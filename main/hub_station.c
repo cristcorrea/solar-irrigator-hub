@@ -65,12 +65,22 @@ void app_main(void)
 
     time_sync_init("CET-1CEST,M3.5.0/2,M10.5.0/3");
 
-    xSemaphoreTake(semaforo_time_listo, portMAX_DELAY);
+    vTaskDelay(pdMS_TO_TICKS(500));
+
+    if(xSemaphoreTake(semaforo_time_listo, portMAX_DELAY) == pdTRUE)
+    {
+        struct tm now = time_sync_get_time();
+        ESP_LOGI("MAIN", "Hora actual: %02d:%02d:%02d", now.tm_hour, now.tm_min, now.tm_sec);
+    }
+
+    ESP_LOGI("TAG", "Iniciando protocolo MQTT"); 
+
+    vTaskDelay(pdMS_TO_TICKS(1000));
+
     mqtt_manager_init();
 
     ESP_LOGI(TAG, "📡 HUB listo para recibir datos por ESP-NOW...");
-    struct tm now = time_sync_get_time();
-    ESP_LOGI("MAIN", "Hora actual: %02d:%02d:%02d", now.tm_hour, now.tm_min, now.tm_sec);
+
     while (true)
     {
         vTaskDelay(pdMS_TO_TICKS(100));

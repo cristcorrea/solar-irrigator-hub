@@ -24,11 +24,11 @@ void time_sync_init(const char *timezone)
     setenv("TZ", timezone, 1);
     tzset();
 
-    sntp_setoperatingmode(SNTP_OPMODE_POLL);
-    sntp_setservername(0, "pool.ntp.org");
-    sntp_set_time_sync_notification_cb(time_sync_notification_cb);
-    sntp_init();
-}
+    esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
+    esp_sntp_setservername(0, "pool.ntp.org");
+    esp_sntp_set_time_sync_notification_cb(time_sync_notification_cb);
+    esp_sntp_init();
+}   
 
 bool time_sync_is_synchronized(void)
 {
