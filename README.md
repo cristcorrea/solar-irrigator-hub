@@ -6,6 +6,7 @@ Este proyecto es el firmware del **hub** del sistema de riego inteligente **Sola
 
 ## 📦 Estructura del proyecto
 
+```text
 .
 ├── components
 │ ├── mqtt_manager
