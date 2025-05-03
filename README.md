@@ -1,5 +1,4 @@
 # Solar Irrigator Hub
-# Solar Irrigator Hub
 
 Este proyecto es el firmware del **hub** del sistema de riego inteligente **Solar Irrigator**, desarrollado para ESP32 usando ESP-IDF v5.4. El hub recibe datos de las esferas (slaves) mediante ESP-NOW, envía datos a una aplicación móvil a través de MQTT, y utiliza BLUFI para la configuración Wi-Fi.
 
