@@ -1,0 +1,4 @@
+/build/
+/.vscode/
+/components/mqtt_manager/certificates/
+/components/mqtt_manager/mqtt_secrets.h
