@@ -29,7 +29,7 @@
 SemaphoreHandle_t semaforo_wifi_listo;
 SemaphoreHandle_t semaforo_time_listo; 
 
-
+char mac_local[18] = {0};  // Formato XX:XX:XX:XX:XX:XX
 
 void hub_iniciar_espnow(void)
 {
@@ -51,7 +51,7 @@ void publicar_mqtt_task(void *pvParameters)
 {
     while (true)
     {
-        mqtt_manager_publicar_datos("11.11.11.11.11", 25.0, 45.0, 4.5, 0); 
+        mqtt_manager_publicar_datos(mac_local, 25.0, 45.0, 4.5, 0); 
         vTaskDelay(pdMS_TO_TICKS(1000));  // Espera 1 segundo
     }
 }

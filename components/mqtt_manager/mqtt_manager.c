@@ -14,7 +14,7 @@
 #define TOPIC_PUB "ismart/app/test"
 static char topic_suscripcion[64] = {0};
 
-char mac_local[18] = {0};  // Formato XX:XX:XX:XX:XX:XX
+extern char mac_local[18];  // Formato XX:XX:XX:XX:XX:XX
 
 //static char *topic_sus = "ismart/hub";
 static esp_mqtt_client_handle_t client = NULL;
