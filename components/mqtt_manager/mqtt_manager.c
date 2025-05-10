@@ -11,9 +11,14 @@
 
 
 #define TAG "MQTT_MANAGER"
-#define MQTT_TOPIC "ismart/data"
+#define TOPIC_PUB "ismart/app/test"
+static char topic_suscripcion[64] = {0};
+
+char mac_local[18] = {0};  // Formato XX:XX:XX:XX:XX:XX
+
+//static char *topic_sus = "ismart/hub";
 static esp_mqtt_client_handle_t client = NULL;
-static char *topic_sus = "ismart/hub"; //"ismart/config";
+
 extern const uint8_t hivemq_certificate_pem_start[] asm("_binary_hivemq_certificate_pem_start");
 // extern const uint8_t hivemq_certificate_pem_end[] asm("_binary_hivemq_certificate_pem_end");
 
@@ -25,8 +30,6 @@ extern const uint8_t client_cert_pem_end[] asm("_binary_client_cert_pem_end");
 
 extern const uint8_t client_key_pem_start[] asm("_binary_client_key_pem_start");
 extern const uint8_t client_key_pem_end[] asm("_binary_client_key_pem_end");
-
-
 
 static esp_err_t mqtt_event_handler_cb(esp_mqtt_event_handle_t event);
 
@@ -176,7 +179,7 @@ static esp_err_t mqtt_event_handler_cb(esp_mqtt_event_handle_t event)
     case MQTT_EVENT_CONNECTED:
         ESP_LOGI(TAG, "🔌 Conectado al broker MQTT");
         vTaskDelay(pdMS_TO_TICKS(500));
-        mqtt_manager_suscribirse(topic_sus);
+        mqtt_manager_suscribirse(topic_suscripcion);
         break;
 
     case MQTT_EVENT_DISCONNECTED:
@@ -222,13 +225,6 @@ static esp_err_t mqtt_event_handler_cb(esp_mqtt_event_handle_t event)
             break;
         }
 
-        // Obtener MAC local del hub
-        uint8_t mac[6];
-        esp_read_mac(mac, ESP_MAC_WIFI_STA);
-        char mac_local[18];
-        snprintf(mac_local, sizeof(mac_local), "%02X:%02X:%02X:%02X:%02X:%02X",
-                 mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-
         if (strcmp(machub->valuestring, mac_local) != 0)
         {
             ESP_LOGI(TAG, "📵 Mensaje no destinado a este hub (%s)", mac_local);
@@ -243,7 +239,7 @@ static esp_err_t mqtt_event_handler_cb(esp_mqtt_event_handle_t event)
             ESP_LOGI(TAG, "📲 Petición de datos recibida. Enviando...");
 
             char *json_out = esfera_manager_generate_json();
-            esp_mqtt_client_publish(event->client, "ismart/data", json_out, 0, 1, 0);
+            esp_mqtt_client_publish(event->client, TOPIC_PUB, json_out, 0, 1, 0);
             free(json_out);
             esfera_manager_clear();
         }
@@ -309,6 +305,17 @@ void espnow_recv_cb(const esp_now_recv_info_t *recv_info, const uint8_t *data, i
 void mqtt_manager_init(void)
 {
 
+    // Obtener la MAC local en formato string
+    uint8_t mac[6];
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    snprintf(mac_local, sizeof(mac_local), "%02X:%02X:%02X:%02X:%02X:%02X",
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    ESP_LOGI(TAG, "🆔 MAC local: %s", mac_local);
+
+    // Construir topic de suscripción: ismart/hub/XX:XX:...
+    snprintf(topic_suscripcion, sizeof(topic_suscripcion), "ismart/hub/%s", mac_local);
+    ESP_LOGI(TAG, "📡 Topic suscripción: %s", topic_suscripcion);
+
     esp_mqtt_client_config_t mqtt_cfg = {
         .broker = {
             .address.uri = MQTT_URI,
@@ -319,12 +326,11 @@ void mqtt_manager_init(void)
         .credentials = {
             .username = MQTT_USERNAME,
             .client_id = "hubE868E7AB2133",
+            .authentication.password = MQTT_PASSWORD, 
+            .authentication.certificate = (const char *)client_cert_pem_start,
+            .authentication.key = (const char *)client_key_pem_start
         },
-        .credentials.authentication = {
-            .password = MQTT_PASSWORD,
-            .certificate = (const char *)client_cert_pem_start,
-            .key = (const char *)client_key_pem_start,
-        }};
+    };
 
     client = esp_mqtt_client_init(&mqtt_cfg);
 
@@ -353,10 +359,10 @@ void mqtt_manager_publicar_datos(const char *mac, float temperatura, float humed
              mac, voltaje,
              mac, riego);
 
-    int msg_id = esp_mqtt_client_publish(client, MQTT_TOPIC, payload, 0, 1, 0);
+    int msg_id = esp_mqtt_client_publish(client, TOPIC_PUB, payload, 0, 1, 0);
     if (msg_id != -1)
     {
-        ESP_LOGI(TAG, "✅ Publicado a %s: %s", MQTT_TOPIC, payload);
+        ESP_LOGI(TAG, "✅ Publicado a %s: %s", TOPIC_PUB, payload);
     }
     else
     {

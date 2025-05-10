@@ -47,6 +47,16 @@ void hub_iniciar_espnow(void)
     esp_now_add_peer(&broadcast_peer);
 }
 
+void publicar_mqtt_task(void *pvParameters)
+{
+    while (true)
+    {
+        mqtt_manager_publicar_datos("11.11.11.11.11", 25.0, 45.0, 4.5, 0); 
+        vTaskDelay(pdMS_TO_TICKS(1000));  // Espera 1 segundo
+    }
+}
+
+
 
 void app_main(void)
 {
@@ -80,6 +90,8 @@ void app_main(void)
     mqtt_manager_init();
 
     ESP_LOGI(TAG, "📡 HUB listo para recibir datos por ESP-NOW...");
+
+    //xTaskCreate(publicar_mqtt_task, "publicar_mqtt_task", 4096, NULL, 5, NULL);
 
     while (true)
     {
