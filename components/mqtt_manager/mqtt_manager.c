@@ -11,10 +11,10 @@
 
 
 #define TAG "MQTT_MANAGER"
-#define TOPIC_PUB "ismart/app/test"
+static char topic_public[30] = {0};
 static char topic_suscripcion[64] = {0};
 
-extern char mac_local[18];  // Formato XX:XX:XX:XX:XX:XX
+extern char mac_local[13];  // Formato XX:XX:XX:XX:XX:XX
 
 //static char *topic_sus = "ismart/hub";
 static esp_mqtt_client_handle_t client = NULL;
@@ -239,7 +239,7 @@ static esp_err_t mqtt_event_handler_cb(esp_mqtt_event_handle_t event)
             ESP_LOGI(TAG, "📲 Petición de datos recibida. Enviando...");
 
             char *json_out = esfera_manager_generate_json();
-            esp_mqtt_client_publish(event->client, TOPIC_PUB, json_out, 0, 1, 0);
+            esp_mqtt_client_publish(event->client, topic_public, json_out, 0, 1, 0);
             free(json_out);
             esfera_manager_clear();
         }
@@ -308,13 +308,15 @@ void mqtt_manager_init(void)
     // Obtener la MAC local en formato string
     uint8_t mac[6];
     esp_read_mac(mac, ESP_MAC_WIFI_STA);
-    snprintf(mac_local, sizeof(mac_local), "%02X:%02X:%02X:%02X:%02X:%02X",
+    snprintf(mac_local, sizeof(mac_local), "%02X%02X%02X%02X%02X%02X",
              mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
     ESP_LOGI(TAG, "🆔 MAC local: %s", mac_local);
 
     // Construir topic de suscripción: ismart/hub/XX:XX:...
+    snprintf(topic_public, sizeof(topic_public), "ismart/app/%s", mac_local);
     snprintf(topic_suscripcion, sizeof(topic_suscripcion), "ismart/hub/%s", mac_local);
     ESP_LOGI(TAG, "📡 Topic suscripción: %s", topic_suscripcion);
+    ESP_LOGI(TAG, "📡 Topic publicación: %s", topic_public);
 
     esp_mqtt_client_config_t mqtt_cfg = {
         .broker = {
@@ -325,7 +327,7 @@ void mqtt_manager_init(void)
         },
         .credentials = {
             .username = MQTT_USERNAME,
-            .client_id = "hubE868E7AB2133",
+            .client_id = mac_local,
             .authentication.password = MQTT_PASSWORD, 
             .authentication.certificate = (const char *)client_cert_pem_start,
             .authentication.key = (const char *)client_key_pem_start
@@ -359,10 +361,10 @@ void mqtt_manager_publicar_datos(const char *mac, float temperatura, float humed
              mac, voltaje,
              mac, riego);
 
-    int msg_id = esp_mqtt_client_publish(client, TOPIC_PUB, payload, 0, 1, 0);
+    int msg_id = esp_mqtt_client_publish(client, topic_public, payload, 0, 1, 0);
     if (msg_id != -1)
     {
-        ESP_LOGI(TAG, "✅ Publicado a %s: %s", TOPIC_PUB, payload);
+        ESP_LOGI(TAG, "✅ Publicado a %s: %s", topic_public, payload);
     }
     else
     {
