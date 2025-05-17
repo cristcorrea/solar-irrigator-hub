@@ -217,20 +217,20 @@ static esp_err_t mqtt_event_handler_cb(esp_mqtt_event_handle_t event)
         }
 
         // Verificar MACHUB
-        cJSON *machub = cJSON_GetObjectItem(json, "MACHUB");
-        if (!cJSON_IsString(machub))
-        {
-            ESP_LOGW(TAG, "❌ MACHUB faltante o inválido");
-            cJSON_Delete(json);
-            break;
-        }
+        // cJSON *machub = cJSON_GetObjectItem(json, "MACHUB");
+        // if (!cJSON_IsString(machub))
+        // {
+        //     ESP_LOGW(TAG, "❌ MACHUB faltante o inválido");
+        //     cJSON_Delete(json);
+        //     break;
+        // }
 
-        if (strcmp(machub->valuestring, mac_local) != 0)
-        {
-            ESP_LOGI(TAG, "📵 Mensaje no destinado a este hub (%s)", mac_local);
-            cJSON_Delete(json);
-            break;
-        }
+        // if (strcmp(machub->valuestring, mac_local) != 0)
+        // {
+        //     ESP_LOGI(TAG, "📵 Mensaje no destinado a este hub (%s)", mac_local);
+        //     cJSON_Delete(json);
+        //     break;
+        // }
 
         // Revisar si es una petición de datos
         cJSON *data_flag = cJSON_GetObjectItem(json, "Data");
@@ -265,8 +265,8 @@ static esp_err_t mqtt_event_handler_cb(esp_mqtt_event_handle_t event)
 
 void espnow_recv_cb(const esp_now_recv_info_t *recv_info, const uint8_t *data, int len)
 {
-    char mac_str[18];
-    snprintf(mac_str, sizeof(mac_str), "%02X:%02X:%02X:%02X:%02X:%02X",
+    char mac_str[13];
+    snprintf(mac_str, sizeof(mac_str), "%02X%02X%02X%02X%02X%02X",
              recv_info->src_addr[0], recv_info->src_addr[1], recv_info->src_addr[2],
              recv_info->src_addr[3], recv_info->src_addr[4], recv_info->src_addr[5]);
 
@@ -289,16 +289,6 @@ void espnow_recv_cb(const esp_now_recv_info_t *recv_info, const uint8_t *data, i
     }else{
         intentar_enviar_configuracion_a_esfera(mac_str, recv_info->src_addr); 
     }
-    
-
-    // esp_err_t res = esp_now_send(recv_info->src_addr, (const uint8_t *)msg, strlen(msg));
-    // if (res == ESP_OK)
-    // {
-    //     ESP_LOGI(TAG, "✅ MAC enviada a %s", mac_str);
-    // }
-    // else{
-    //     ESP_LOGE(TAG, "❌ Error al enviar respuesta a %s", mac_str);
-    // }
 
 }
 
