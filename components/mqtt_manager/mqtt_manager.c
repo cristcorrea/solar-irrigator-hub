@@ -91,6 +91,7 @@ static void intentar_enviar_configuracion_a_esfera(const char *mac_str, const ui
     esp_err_t send_result = esp_now_send(mac_bin, (uint8_t *)config_json, strlen(config_json));
     if (send_result == ESP_OK) {
         ESP_LOGI("HUB", "Configuración enviada a %s", mac_str);
+        ESP_LOGI("HUB", "%s", config_json);
         // Nota: eliminar solo tras ACK de la esfera
     } else {
         ESP_LOGE("HUB", "Fallo al enviar configuración a %s", mac_str);
