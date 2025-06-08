@@ -9,13 +9,17 @@ Este proyecto es el firmware del **hub** del sistema de riego inteligente **Sola
 ```text
 .
 ├── components
-│ ├── mqtt_manager
-│ ├── blufi_manager
-│ └── esfera_manager
+│   ├── mqtt_manager
+│   ├── blufi_manager
+│   ├── esfera_manager
+│   ├── time_sync
+│   └── CJSON
 ├── main
 ├── build/ ← ignorado por git
 ├── .vscode/ ← ignorado por git
 ├── CMakeLists.txt
+├── partitions.csv
+├── sdkconfig.defaults
 └── README.md
 
 
@@ -27,6 +31,8 @@ Este proyecto es el firmware del **hub** del sistema de riego inteligente **Sola
 - Comunicación MQTT con la app móvil
 - Configuración Wi-Fi por BLUFI
 - Manejo de credenciales y certificados seguros
+- Sincronización de hora mediante NTP
+- Almacenamiento temporal de configuraciones de esferas
 
 ---
 
@@ -37,29 +43,32 @@ Este proyecto es el firmware del **hub** del sistema de riego inteligente **Sola
 ```bash
 git clone https://github.com/cristcorrea/solar-irrigator-hub.git
 cd solar-irrigator-hub
+```
 
 2. Instala ESP-IDF 5.4 siguiendo la guía oficial:
-https://docs.espressif.com/projects/esp-idf/en/v5.4/
+<https://docs.espressif.com/projects/esp-idf/en/v5.4/>
 
 3. Configura el proyecto:
-idf.py menuconfig
 
-4. Compila y flashea: 
+```bash
+idf.py menuconfig
+```
+
+4. Compila y flashea:
+
+```bash
 idf.py build
 idf.py flash monitor
-
+```
 
 
 🔒 Exclusiones en .gitignore
 El repositorio ignora:
 
-/build/
-
-/.vscode/
-
-/components/mqtt_manager/certificates/
-
-/components/mqtt_manager/mqtt_secrets.h
+- /build/
+- /.vscode/
+- /components/mqtt_manager/certificates/
+- /components/mqtt_manager/mqtt_secrets.h
 
 
 📄 Licencia
@@ -67,4 +76,5 @@ Este proyecto es privado y no tiene licencia explícita. Si deseas usarlo, consu
 
 🤝 Autor
 Cristian Correa
-GitHub
+[GitHub](https://github.com/cristcorrea)
+
