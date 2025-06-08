@@ -30,10 +30,9 @@
 
 #include "esp_blufi_api.h"
 #include "blufi_manager.h"
-
 #include "esp_blufi.h"
 
-#define EXAMPLE_WIFI_CONNECTION_MAXIMUM_RETRY 10
+#define EXAMPLE_WIFI_CONNECTION_MAXIMUM_RETRY 3
 #define EXAMPLE_INVALID_REASON                255
 #define EXAMPLE_INVALID_RSSI                  -128
 
@@ -66,6 +65,7 @@ static bool gl_sta_is_connecting = false;
 static esp_blufi_extra_info_t gl_sta_conn_info;
 
 extern SemaphoreHandle_t semaforo_wifi_listo; 
+extern char mac_local[18];
 
 static void example_record_wifi_conn_info(int rssi, uint8_t reason)
 {
@@ -132,6 +132,9 @@ static void ip_event_handler(void* arg, esp_event_base_t event_base,
         info.sta_ssid = gl_sta_ssid;
         info.sta_ssid_len = gl_sta_ssid_len;
         gl_sta_got_ip = true;
+        
+        ESP_ERROR_CHECK(esp_blufi_send_custom_data((uint8_t *)mac_local, strlen(mac_local)));
+
         xSemaphoreGive(semaforo_wifi_listo); 
         if (ble_is_connected == true) {
             esp_blufi_send_wifi_conn_report(mode, ESP_BLUFI_STA_CONN_SUCCESS, softap_get_current_connection_number(), &info);

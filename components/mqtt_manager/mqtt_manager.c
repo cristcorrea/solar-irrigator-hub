@@ -296,12 +296,15 @@ void espnow_recv_cb(const esp_now_recv_info_t *recv_info, const uint8_t *data, i
 void mqtt_manager_init(void)
 {
 
+
     // Obtener la MAC local en formato string
+    /*
     uint8_t mac[6];
     esp_read_mac(mac, ESP_MAC_WIFI_STA);
     snprintf(mac_local, sizeof(mac_local), "%02X%02X%02X%02X%02X%02X",
              mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
     ESP_LOGI(TAG, "🆔 MAC local: %s", mac_local);
+    */
 
     // Construir topic de suscripción: ismart/hub/XX:XX:...
     snprintf(topic_public, sizeof(topic_public), "ismart/app/%s", mac_local);

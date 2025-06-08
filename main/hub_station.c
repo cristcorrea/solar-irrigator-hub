@@ -6,6 +6,7 @@
 #include "esp_netif.h"
 #include "esp_wifi.h"
 #include "esp_now.h"
+#include "esp_mac.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
@@ -52,10 +53,17 @@ void app_main(void)
 {
     ESP_LOGI(TAG, "[HUB] Iniciando...");
 
+        // Obtener la MAC local en formato string
+    uint8_t mac[6];
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    snprintf(mac_local, sizeof(mac_local), "%02X%02X%02X%02X%02X%02X",
+                mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    ESP_LOGI(TAG, "🆔 MAC local: %s", mac_local);
+
     semaforo_wifi_listo = xSemaphoreCreateBinary();
     semaforo_time_listo = xSemaphoreCreateBinary(); 
 
-    //nvs_flash_erase(); 
+    nvs_flash_erase(); 
 
     ESP_LOGI(TAG, "📲 Iniciando BLUFI...");
     blufi_init();
