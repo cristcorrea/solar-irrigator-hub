@@ -18,6 +18,8 @@
 #include "cJSON.h"
 #include "esfera_manager.h"
 #include "time_sync.h"
+#include "detector_manager.h"
+
 
 
 #define TAG "HUB"
@@ -89,6 +91,7 @@ void app_main(void)
 
     ESP_LOGI(TAG, "📡 HUB listo para recibir datos por ESP-NOW...");
 
+    detector_manager_init();
 
     while (true)
     {

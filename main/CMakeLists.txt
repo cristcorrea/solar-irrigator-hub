@@ -16,4 +16,5 @@ idf_component_register(
         CJSON
         esfera_manager
         time_sync
+        detector_manager
 )
