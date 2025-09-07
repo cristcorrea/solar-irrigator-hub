@@ -71,12 +71,14 @@ void app_main(void)
     blufi_init();
 
     ESP_LOGI(TAG, "⏳ Esperando configuración Wi-Fi por BLUFI...");
+    //Espera a que finalice la conexion Wi-Fi para sincronizar la hora. 
     xSemaphoreTake(semaforo_wifi_listo, portMAX_DELAY);
 
     time_sync_init("CET-1CEST,M3.5.0/2,M10.5.0/3");
 
     vTaskDelay(pdMS_TO_TICKS(500));
 
+    //Espera a que finalice la sincronizacion de la hora para consultar. 
     if(xSemaphoreTake(semaforo_time_listo, portMAX_DELAY) == pdTRUE)
     {
         struct tm now = time_sync_get_time();
