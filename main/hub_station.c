@@ -19,7 +19,7 @@
 #include "esfera_manager.h"
 #include "time_sync.h"
 #include "detector_manager.h"
-
+#include "button_manager.h"
 
 
 #define TAG "HUB"
@@ -41,7 +41,7 @@ void hub_iniciar_espnow(void)
     ESP_ERROR_CHECK(esp_now_register_recv_cb(espnow_recv_cb));
 
     esp_now_peer_info_t broadcast_peer = {
-        .channel = 6,
+        .channel = 11,
         .ifidx = WIFI_IF_STA,
         .encrypt = false};
 
@@ -55,6 +55,8 @@ void app_main(void)
 {
     ESP_LOGI(TAG, "[HUB] Iniciando...");
 
+    button_init();
+
         // Obtener la MAC local en formato string
     uint8_t mac[6];
     esp_read_mac(mac, ESP_MAC_WIFI_STA);
@@ -65,7 +67,7 @@ void app_main(void)
     semaforo_wifi_listo = xSemaphoreCreateBinary();
     semaforo_time_listo = xSemaphoreCreateBinary(); 
 
-    nvs_flash_erase(); 
+
 
     ESP_LOGI(TAG, "📲 Iniciando BLUFI...");
     blufi_init();

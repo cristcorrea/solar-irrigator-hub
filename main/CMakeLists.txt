@@ -17,4 +17,5 @@ idf_component_register(
         esfera_manager
         time_sync
         detector_manager
+        button_manager
 )

@@ -4,17 +4,22 @@
 #include "freertos/task.h"
 #include "esp_log.h"
 
-#define DEV_DETEC_GPIO  GPIO_NUM_5  // Cambiar si se conecta a otro pin
-#define PS_ENB_GPIO     GPIO_NUM_4  // Cambiar si se conecta a otro pin
+#define DEV_DETEC_GPIO  GPIO_NUM_5  
+#define PS_ENB_GPIO     GPIO_NUM_4  
 
 static const char *TAG = "detector_manager";
 
 static void detector_task(void *arg)
 {
+    static int last_level = 1;
+
     while (1) {
-        int level = gpio_get_level(DEV_DETEC_GPIO);
-        gpio_set_level(PS_ENB_GPIO, level == 0 ? 1 : 0);
-        ESP_LOGI(TAG, "Level readed: %i", level);
+        int current_level = gpio_get_level(DEV_DETEC_GPIO);
+        if (last_level == 1 && current_level == 0){
+            gpio_set_level(PS_ENB_GPIO, current_level == 0 ? 1 : 0);
+            ESP_LOGI(TAG, "Esfera detectada: %i", current_level );
+        }
+        last_level = current_level; 
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
@@ -45,5 +50,5 @@ void detector_manager_init(void)
     gpio_set_level(PS_ENB_GPIO, 0);  // Apagar al inicio
 
     // Crear la tarea de detección
-    xTaskCreate(detector_task, "detector_task", 2048, NULL, 5, NULL);
+    xTaskCreate(detector_task, "detector_task", 4096, NULL, 5, NULL);
 }
