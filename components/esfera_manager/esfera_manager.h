@@ -1,6 +1,7 @@
 #pragma once
 
 #include <inttypes.h>
+#include "esp_err.h"
 
 typedef struct {
     float humedad;
@@ -15,3 +16,4 @@ void esfera_manager_init(void);
 void esfera_manager_add(const char *raw_payload, const char *mac_origen);
 char *esfera_manager_generate_json(void);
 void esfera_manager_clear(void);
+esp_err_t esfera_manager_register_mac(const char *mac);

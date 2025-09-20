@@ -41,7 +41,6 @@ void hub_iniciar_espnow(void)
     ESP_ERROR_CHECK(esp_now_register_recv_cb(espnow_recv_cb));
 
     esp_now_peer_info_t broadcast_peer = {
-        .channel = 11,
         .ifidx = WIFI_IF_STA,
         .encrypt = false};
 

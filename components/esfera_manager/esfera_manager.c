@@ -5,6 +5,7 @@
 #include <time.h>
 #include "esp_log.h"
 #include "cJSON.h"
+#include "nvs_flash.h"
 
 #define MAX_ENTRADAS 32
 
@@ -17,6 +18,7 @@ void esfera_manager_init(void) {
     memset(buffer, 0, sizeof(buffer));
 }
 
+//Agrega lecturas de esferas en la memoria 
 void esfera_manager_add(const char *raw_payload, const char *mac_origen) {
     if (buffer_index >= MAX_ENTRADAS) {
         ESP_LOGW(TAG, "⚠️ Buffer lleno, descartando entrada");
@@ -72,3 +74,28 @@ void esfera_manager_clear(void) {
     memset(buffer, 0, sizeof(buffer));
     ESP_LOGI(TAG, "🧹 Buffer de esferas limpiado");
 }
+
+esp_err_t esfera_manager_register_mac(const char *mac) {
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open("esferas", NVS_READWRITE, &handle);
+    if (err != ESP_OK) return err;
+
+    size_t len = 0;
+    err = nvs_get_str(handle, mac, NULL, &len);
+
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        // La MAC no existe, la guardamos como "registered"
+        err = nvs_set_str(handle, mac, "registered");
+        if (err == ESP_OK) {
+            err = nvs_commit(handle);
+            ESP_LOGI("ESFERA_MANAGER", "✅ Nueva esfera registrada en NVS: %s", mac);
+        }
+    } else if (err == ESP_OK) {
+        // Ya estaba registrada
+        ESP_LOGD("ESFERA_MANAGER", "ℹ️ Esfera %s ya estaba registrada en NVS", mac);
+    }
+
+    nvs_close(handle);
+    return err;
+}
+
