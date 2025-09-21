@@ -6,11 +6,12 @@
 #include "freertos/queue.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
+#include "nvs.h"
 
 #define BTN_GPIO                19
 #define DEBOUNCE_US             40000      // 40 ms
-#define LONG_PRESS_US           2000000    // 2 s
-#define VERY_LONG_PRESS_US      5000000    // 5 s
+#define LONG_PRESS_US           3000000    // 3 s
+#define VERY_LONG_PRESS_US      8000000    // 8 s
 
 static const char *TAG = "BTN";
 static QueueHandle_t s_btn_evt_queue;
@@ -21,6 +22,40 @@ static volatile int64_t s_press_start_us;  // timestamp de pulsación
 
 typedef enum { BTN_EDGE_FALL = 0, BTN_EDGE_RISE = 1 } btn_edge_t;
 typedef struct { btn_edge_t edge; int level; int64_t t_us; } btn_evt_t;
+
+static esp_err_t nvs_erase_namespace_all(const char *ns)
+{
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(ns, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "No se pudo abrir NVS namespace '%s': %s", ns, esp_err_to_name(err));
+        return err;
+    }
+
+    err = nvs_erase_all(h);  // borra todas las claves SOLO de este namespace
+    if (err == ESP_OK) {
+        esp_err_t c = nvs_commit(h);
+        if (c != ESP_OK) {
+            ESP_LOGE(TAG, "Commit falló en '%s': %s", ns, esp_err_to_name(c));
+            nvs_close(h);
+            return c;
+        }
+        ESP_LOGI(TAG, "Namespace '%s' limpiado.", ns);
+    } else {
+        ESP_LOGE(TAG, "Fallo al borrar namespace '%s': %s", ns, esp_err_to_name(err));
+    }
+
+    nvs_close(h);
+    return err;
+}
+
+static void borrar_esferas_y_config(void)
+{
+    // Limpia registro de esferas y configuraciones por MAC
+    nvs_erase_namespace_all("esferas");       // esfera_manager_register_mac() 
+    nvs_erase_namespace_all("config_store");  // procesar_configuracion_esfera() 
+}
+
 
 static void IRAM_ATTR gpio_isr(void *arg)
 {
@@ -75,8 +110,8 @@ static void button_task(void *arg)
                     nvs_flash_init();    // opcional, para dejar consistente
                     esp_restart();
                 } else if (dur >= LONG_PRESS_US) {
-                    ESP_LOGI(TAG, "Long press → acción larga (p.ej. entrar en modo setup)");
-                    // TODO: tu acción (ej. marcar flag de modo configuración)
+                    ESP_LOGI(TAG, "Long press → borrar 'esferas' y 'config_store' (conserva wifi)");
+                    borrar_esferas_y_config(); 
                 } else {
                     ESP_LOGI(TAG, "Short press → acción corta (p.ej. enviar comando MQTT)");
                     // TODO: tu acción (ej. publicar 'S' por MQTT)
@@ -118,3 +153,4 @@ void button_init(void)
 
     ESP_LOGI(TAG, "Button on GPIO%d ready (pull-up, ANYEDGE, debounce %d ms)", BTN_GPIO, DEBOUNCE_US/1000);
 }
+
