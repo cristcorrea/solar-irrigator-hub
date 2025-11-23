@@ -1,3 +1,4 @@
 idf_component_register(SRCS "detector_manager.c"
                        INCLUDE_DIRS "."
-                       REQUIRES driver freertos log)
+                       REQUIRES driver freertos log
+                       PRIV_REQUIRES main)

@@ -28,16 +28,27 @@
 // int riego;
 // char mac_dato[32];
 
+void hub_enviar_broadcast_descubrimiento(void);
+
 SemaphoreHandle_t semaforo_wifi_listo;
 SemaphoreHandle_t semaforo_time_listo; 
 
-char mac_local[18] = {0};  // Formato XX:XX:XX:XX:XX:XX
+static bool s_espnow_iniciado = false;   
+
+char mac_local[13] = {0};  // Formato XX:XX:XX:XX:XX:XX
 
 void hub_iniciar_espnow(void)
 {
     ESP_LOGI("HUB", "⚙️ Iniciando ESP-NOW...");
 
+    if (s_espnow_iniciado)
+    {
+        ESP_LOGW("HUB", "ESP-NOW ya estaba iniciado");
+        return;
+    }
+
     ESP_ERROR_CHECK(esp_now_init());
+    esp_wifi_set_ps(WIFI_PS_NONE); 
     ESP_ERROR_CHECK(esp_now_register_recv_cb(espnow_recv_cb));
 
     esp_now_peer_info_t broadcast_peer = {
@@ -46,8 +57,39 @@ void hub_iniciar_espnow(void)
 
     memset(broadcast_peer.peer_addr, 0xFF, ESP_NOW_ETH_ALEN);
     esp_now_add_peer(&broadcast_peer);
+
+    s_espnow_iniciado = true;   // <<< NUEVO
+
 }
 
+// En hub_station.c
+
+void hub_enviar_broadcast_descubrimiento(void)
+{
+    if (!s_espnow_iniciado) {
+        ESP_LOGW(TAG, "ESP-NOW no iniciado: no se envía broadcast");
+        return;
+    }
+
+    uint8_t bcast_addr[ESP_NOW_ETH_ALEN];
+    memset(bcast_addr, 0xFF, sizeof(bcast_addr));
+
+    char payload[64];
+    int len = snprintf(payload, sizeof(payload),
+                       "HELLO_ESFERA,%s", mac_local);
+    if (len <= 0) {
+        ESP_LOGE(TAG, "Error formateando payload de broadcast");
+        return;
+    }
+
+    esp_err_t err = esp_now_send(bcast_addr, (uint8_t *)payload, len);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Error enviando broadcast ESP-NOW: %s",
+                 esp_err_to_name(err));
+    } else {
+        ESP_LOGI(TAG, "Broadcast ESP-NOW enviado: %s", payload);
+    }
+}
 
 
 void app_main(void)

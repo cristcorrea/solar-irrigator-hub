@@ -3,6 +3,9 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
+#include "hub_station.h"
+
+
 
 #define DEV_DETEC_GPIO  GPIO_NUM_5  
 #define PS_ENB_GPIO     GPIO_NUM_4  
@@ -17,7 +20,12 @@ static void detector_task(void *arg)
         int current_level = gpio_get_level(DEV_DETEC_GPIO);
         if (last_level == 1 && current_level == 0){
             gpio_set_level(PS_ENB_GPIO, current_level == 0 ? 1 : 0);
-            ESP_LOGI(TAG, "Esfera detectada: %i", current_level );
+            ESP_LOGI(TAG, "Esfera detectada con éxito!");
+            // Pequeño retardo para que la esfera empiece a arrancar
+            vTaskDelay(pdMS_TO_TICKS(100)); // opcional, 50–200 ms
+
+            // Enviar mensaje broadcast ESP-NOW de descubrimiento
+            hub_enviar_broadcast_descubrimiento(); // <<< NUEVO
         }
         last_level = current_level; 
         vTaskDelay(pdMS_TO_TICKS(1000));

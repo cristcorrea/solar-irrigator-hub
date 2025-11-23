@@ -64,7 +64,7 @@ static bool gl_sta_is_connecting = false;
 static esp_blufi_extra_info_t gl_sta_conn_info;
 
 extern SemaphoreHandle_t semaforo_wifi_listo;
-extern char mac_local[18];
+extern char mac_local[13];
 
 static void example_record_wifi_conn_info(int rssi, uint8_t reason)
 {
