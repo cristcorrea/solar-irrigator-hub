@@ -31,6 +31,8 @@ static char topic_suscripcion[64] = {0};
 extern char mac_local[13]; // Formato XX:XX:XX:XX:XX:XX
 
 static esp_mqtt_client_handle_t client = NULL;
+static int s_pending_telemetry_msg_id = -1;
+static size_t s_pending_telemetry_count = 0;
 
 // --- Certificados (definidos en mqtt_secrets.h) ---
 extern const uint8_t ca_cert_pem_start[] asm("_binary_ca_cert_pem_start");
@@ -62,15 +64,35 @@ static int hex_nibble(char c)
     return -1;
 }
 
+static bool normalize_mac(const char *input, char output[13])
+{
+    if (input == NULL || output == NULL) {
+        return false;
+    }
+
+    size_t out_index = 0;
+    for (size_t i = 0; input[i] != '\0'; ++i) {
+        if (input[i] == ':') {
+            continue;
+        }
+        if (out_index >= 12 || hex_nibble(input[i]) < 0) {
+            return false;
+        }
+        char value = input[i];
+        output[out_index++] = (value >= 'a' && value <= 'f') ? (char)(value - 'a' + 'A') : value;
+    }
+    output[out_index] = '\0';
+    return out_index == 12;
+}
+
 static bool mac_str_to_bytes(const char *mac_str, uint8_t out[6])
 {
-    if (!mac_str) return false;
-    size_t len = strlen(mac_str);
-    if (len != 12) return false;
+    char normalized[13];
+    if (!normalize_mac(mac_str, normalized)) return false;
 
     for (int i = 0; i < 6; i++) {
-        int hi = hex_nibble(mac_str[2 * i]);
-        int lo = hex_nibble(mac_str[2 * i + 1]);
+        int hi = hex_nibble(normalized[2 * i]);
+        int lo = hex_nibble(normalized[2 * i + 1]);
         if (hi < 0 || lo < 0) return false;
         out[i] = (uint8_t)((hi << 4) | lo);
     }
@@ -86,22 +108,26 @@ static bool cfg_ack_is_applied(const char *mac_clean)
     if (nvs_open("config_store", NVS_READONLY, &h) != ESP_OK)
         return false;
     char key[20];
-    snprintf(key, sizeof(key), "ack_%s", mac_clean);
+    snprintf(key, sizeof(key), "a%s", mac_clean);
     esp_err_t err = nvs_get_u8(h, key, &ack);
     nvs_close(h);
     return (err == ESP_OK && ack == 1);
 }
 
-static void cfg_ack_set_applied(const char *mac_clean, bool applied)
+static esp_err_t cfg_ack_set_applied(const char *mac_clean, bool applied)
 {
     nvs_handle_t h;
-    if (nvs_open("config_store", NVS_READWRITE, &h) != ESP_OK)
-        return;
+    esp_err_t err = nvs_open("config_store", NVS_READWRITE, &h);
+    if (err != ESP_OK)
+        return err;
     char key[20];
-    snprintf(key, sizeof(key), "ack_%s", mac_clean);
-    nvs_set_u8(h, key, applied ? 1 : 0);
-    nvs_commit(h);
+    snprintf(key, sizeof(key), "a%s", mac_clean);
+    err = nvs_set_u8(h, key, applied ? 1 : 0);
+    if (err == ESP_OK) {
+        err = nvs_commit(h);
+    }
     nvs_close(h);
+    return err;
 }
 
 // ============================================================
@@ -113,11 +139,10 @@ static void intentar_enviar_configuracion_a_esfera(const char *mac_str, const ui
     esp_err_t send_result;
 
     char mac_clean[13];
-    int j = 0;
-    for (int i = 0; mac_str[i] && j < 12; i++)
-        if (mac_str[i] != ':')
-            mac_clean[j++] = mac_str[i];
-    mac_clean[j] = '\0';
+    if (!normalize_mac(mac_str, mac_clean)) {
+        ESP_LOGE(TAG, "MAC inválida al enviar configuración");
+        return;
+    }
 
     // --- NUEVO: no enviar si ya aplicada ---
     if (cfg_ack_is_applied(mac_clean))
@@ -140,9 +165,12 @@ static void intentar_enviar_configuracion_a_esfera(const char *mac_str, const ui
         snprintf(buffer + (used - 1), sizeof(buffer) - (used - 1),
                  ",\"ts\":%ld}", (long)now);
 
-        esp_now_send(mac_bin, (uint8_t *)buffer, strlen(buffer));
-
-        ESP_LOGI(TAG, "✅ Configuración estándar enviada a %s", mac_str);
+        send_result = esp_now_send(mac_bin, (uint8_t *)buffer, strlen(buffer));
+        if (send_result == ESP_OK) {
+            ESP_LOGI(TAG, "✅ Configuración estándar enviada a %s", mac_str);
+        } else {
+            ESP_LOGE(TAG, "No se pudo enviar configuración estándar: %s", esp_err_to_name(send_result));
+        }
         return;
     }
 
@@ -159,9 +187,17 @@ static void intentar_enviar_configuracion_a_esfera(const char *mac_str, const ui
         snprintf(buffer + (used - 1), sizeof(buffer) - (used - 1),
                  ",\"ts\":%ld}", (long)now);
 
-        esp_now_send(mac_bin, (uint8_t *)buffer, strlen(buffer));
-
-        ESP_LOGI(TAG, "✅ Configuración estándar enviada a %s", mac_str);
+        send_result = esp_now_send(mac_bin, (uint8_t *)buffer, strlen(buffer));
+        if (send_result == ESP_OK) {
+            ESP_LOGI(TAG, "✅ Configuración estándar enviada a %s", mac_str);
+        } else {
+            ESP_LOGE(TAG, "No se pudo enviar configuración estándar: %s", esp_err_to_name(send_result));
+        }
+        nvs_close(nvs_handle);
+        return;
+    }
+    if (err != ESP_OK || required_size == 0) {
+        ESP_LOGE(TAG, "No se pudo consultar configuración de %s: %s", mac_str, esp_err_to_name(err));
         nvs_close(nvs_handle);
         return;
     }
@@ -235,73 +271,13 @@ static void intentar_enviar_configuracion_a_esfera(const char *mac_str, const ui
 // ============================================================
 static void procesar_configuracion_esfera(const char *payload)
 {
-    cJSON *json = cJSON_Parse(payload);
-    if (!json)
-    {
-        ESP_LOGE(TAG, "❌ Error al parsear JSON");
-        return;
-    }
-
-    cJSON *data_flag = cJSON_GetObjectItem(json, "Data");
-    if (cJSON_IsBool(data_flag) && cJSON_IsTrue(data_flag))
-    {
-        ESP_LOGI(TAG, "📲 Petición de datos (se maneja en handler)");
-        cJSON_Delete(json);
-        return;
-    }
-
-    cJSON *mac_slave = cJSON_GetObjectItem(json, "MACSLAVE");
-    if (!cJSON_IsString(mac_slave))
-    {
-        ESP_LOGE(TAG, "❌ MACSLAVE inválido o ausente");
-        cJSON_Delete(json);
-        return;
-    }
-
-    char *json_string = cJSON_PrintUnformatted(json);
-    if (!json_string)
-    {
-        ESP_LOGE(TAG, "❌ No se pudo convertir JSON a string");
-        cJSON_Delete(json);
-        return;
-    }
-
     char mac_clean[13];
-    int j = 0;
-    for (int i = 0; mac_slave->valuestring[i] && j < 12; i++)
-    {
-        if (mac_slave->valuestring[i] != ':')
-            mac_clean[j++] = mac_slave->valuestring[i];
+    esp_err_t err = esfera_manager_store_config(payload, strlen(payload), mac_clean);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "💾 Configuración almacenada para %s", mac_clean);
+    } else {
+        ESP_LOGE(TAG, "Configuración rechazada: %s", esp_err_to_name(err));
     }
-    mac_clean[j] = '\0';
-
-    nvs_handle_t nvs_handle;
-    esp_err_t err = nvs_open("config_store", NVS_READWRITE, &nvs_handle);
-    if (err != ESP_OK)
-    {
-        ESP_LOGE(TAG, "❌ Error abriendo NVS: %s", esp_err_to_name(err));
-        free(json_string);
-        cJSON_Delete(json);
-        return;
-    }
-
-    err = nvs_set_str(nvs_handle, mac_clean, json_string);
-    if (err == ESP_OK)
-    {
-        nvs_commit(nvs_handle);
-        ESP_LOGI(TAG, "💾 Configuración almacenada para %s", mac_slave->valuestring);
-        nvs_close(nvs_handle);
-        cfg_ack_set_applied(mac_clean, false);
-    }
-    else
-    {
-        ESP_LOGE(TAG, "❌ Error escribiendo en NVS: %s", esp_err_to_name(err));
-        nvs_close(nvs_handle);
-    }
-
-    nvs_close(nvs_handle);
-    free(json_string);
-    cJSON_Delete(json);
 }
 
 // ============================================================
@@ -313,18 +289,29 @@ static esp_err_t mqtt_event_handler_cb(esp_mqtt_event_handle_t event)
     {
     case MQTT_EVENT_CONNECTED:
         ESP_LOGI(TAG, "🔌 Conectado al broker MQTT");
-        vTaskDelay(pdMS_TO_TICKS(500));
         mqtt_manager_suscribirse(topic_suscripcion);
         break;
 
     case MQTT_EVENT_DATA:
     {
-        ESP_LOGI(TAG, "📥 Mensaje recibido:");
-        ESP_LOGI(TAG, "📌 Topic: %.*s", event->topic_len, event->topic);
-        ESP_LOGI(TAG, "📝 Data: %.*s", event->data_len, event->data);
+        if (event->topic_len != (int)strlen(topic_suscripcion) ||
+            memcmp(event->topic, topic_suscripcion, event->topic_len) != 0) {
+            ESP_LOGW(TAG, "Mensaje descartado por topic inesperado");
+            break;
+        }
+
+        if (event->current_data_offset != 0 || event->data_len != event->total_data_len ||
+            event->data_len <= 0 || event->data_len >= 256) {
+            ESP_LOGW(TAG, "Payload MQTT fragmentado o fuera de límite: %d/%d bytes",
+                     event->data_len, event->total_data_len);
+            break;
+        }
+
+        ESP_LOGI(TAG, "📥 Mensaje recibido en %.*s (%d bytes)",
+                 event->topic_len, event->topic, event->data_len);
 
         char payload[256];
-        int len = event->data_len < sizeof(payload) - 1 ? event->data_len : sizeof(payload) - 1;
+        int len = event->data_len;
         memcpy(payload, event->data, len);
         payload[len] = '\0';
 
@@ -340,10 +327,28 @@ static esp_err_t mqtt_event_handler_cb(esp_mqtt_event_handle_t event)
         {
             ESP_LOGI(TAG, "📲 Petición de datos recibida. Enviando...");
 
-            char *json_out = esfera_manager_generate_json();
-            esp_mqtt_client_publish(event->client, topic_public, json_out, 0, 1, 0);
+            if (s_pending_telemetry_msg_id >= 0) {
+                ESP_LOGW(TAG, "Ya hay una entrega de telemetría pendiente de ACK MQTT");
+                cJSON_Delete(json);
+                break;
+            }
+
+            size_t entry_count = 0;
+            char *json_out = esfera_manager_generate_json(&entry_count);
+            if (json_out == NULL) {
+                ESP_LOGE(TAG, "No se pudo generar la respuesta de telemetría");
+                cJSON_Delete(json);
+                break;
+            }
+
+            int msg_id = esp_mqtt_client_enqueue(event->client, topic_public, json_out, 0, 1, 0, true);
             free(json_out);
-            esfera_manager_clear();
+            if (msg_id < 0) {
+                ESP_LOGE(TAG, "No se pudo encolar la telemetría MQTT; se conserva en NVS");
+            } else if (entry_count > 0) {
+                s_pending_telemetry_msg_id = msg_id;
+                s_pending_telemetry_count = entry_count;
+            }
         }
         else
         {
@@ -354,6 +359,20 @@ static esp_err_t mqtt_event_handler_cb(esp_mqtt_event_handle_t event)
         cJSON_Delete(json);
         break;
     }
+
+    case MQTT_EVENT_PUBLISHED:
+        if (event->msg_id == s_pending_telemetry_msg_id) {
+            esp_err_t err = esfera_manager_remove_oldest(s_pending_telemetry_count);
+            if (err == ESP_OK) {
+                ESP_LOGI(TAG, "Telemetría confirmada por MQTT y retirada de NVS");
+            } else {
+                ESP_LOGE(TAG, "MQTT confirmó datos, pero NVS no pudo actualizarlos: %s",
+                         esp_err_to_name(err));
+            }
+            s_pending_telemetry_msg_id = -1;
+            s_pending_telemetry_count = 0;
+        }
+        break;
 
     default:
         break;
@@ -380,7 +399,10 @@ static void procesar_mensaje_ctrl_esfera(const char *mac_str, const char *payloa
     if (strncmp(payload, "CFG_OK", 6) == 0)
     {
         ESP_LOGI(TAG, "🟢 %s confirmó configuración (CFG_OK)", mac_str);
-        cfg_ack_set_applied(mac_clean, true);
+        esp_err_t ack_err = cfg_ack_set_applied(mac_clean, true);
+        if (ack_err != ESP_OK) {
+            ESP_LOGE(TAG, "No se pudo persistir ACK de configuración: %s", esp_err_to_name(ack_err));
+        }
 
         if (client)
         {
@@ -399,7 +421,11 @@ static void procesar_mensaje_ctrl_esfera(const char *mac_str, const char *payloa
                 peer.ifidx = WIFI_IF_STA;
                 peer.encrypt = false;
                 memcpy(peer.peer_addr, mac_bin, ESP_NOW_ETH_ALEN);
-                esp_now_add_peer(&peer);
+                esp_err_t peer_err = esp_now_add_peer(&peer);
+                if (peer_err != ESP_OK && peer_err != ESP_ERR_ESPNOW_EXIST) {
+                    ESP_LOGW(TAG, "No se pudo registrar peer para ACK: %s", esp_err_to_name(peer_err));
+                    return;
+                }
             }
 
             const char ack_msg[] = "ACK_END"; // Mensaje que la esfera debe esperar
@@ -448,12 +474,14 @@ static void procesar_mensaje_ctrl_esfera(const char *mac_str, const char *payloa
 // ============================================================
 void espnow_recv_cb(const esp_now_recv_info_t *recv_info, const uint8_t *data, int len)
 {
-    if (!s_espnow_rx_q)
+    if (!s_espnow_rx_q || recv_info == NULL || recv_info->src_addr == NULL || data == NULL ||
+        len <= 0 || len >= (int)sizeof(((espnow_rx_msg_t *)0)->payload)) {
         return;
+    }
 
     espnow_rx_msg_t m = (espnow_rx_msg_t){0};
     memcpy(m.src, recv_info->src_addr, ESP_NOW_ETH_ALEN);
-    m.len = (len < sizeof(m.payload) - 1) ? len : sizeof(m.payload) - 1;
+    m.len = (uint16_t)len;
     memcpy(m.payload, data, m.len);
     m.payload[m.len] = '\0';
 
@@ -481,6 +509,10 @@ static void espnow_worker_task(void *arg)
         // 1) Control de config (CFG_OK / CFG_ERR) para no romper el parser de datos
         if (strncmp(m.payload, "CFG_", 4) == 0)
         {
+            if (!esfera_manager_is_registered(mac_str)) {
+                ESP_LOGW(TAG, "Control rechazado de dispositivo no registrado: %s", mac_str);
+                continue;
+            }
             procesar_mensaje_ctrl_esfera(mac_str, m.payload);
             continue;
         }
@@ -488,10 +520,20 @@ static void espnow_worker_task(void *arg)
         // 1.b) Mensaje de emparejamiento: HELLO_HUB,<MAC_ESFERA>
         if (strncmp(m.payload, "HELLO_HUB,", 10) == 0)
         {
+            char claimed_mac[13];
+            if (!normalize_mac(m.payload + 10, claimed_mac) || strcmp(claimed_mac, mac_str) != 0) {
+                ESP_LOGW(TAG, "HELLO_HUB rechazado: MAC declarada no coincide con remitente %s", mac_str);
+                continue;
+            }
+
             ESP_LOGI(TAG, "🤝 HELLO_HUB recibido de %s: %s", mac_str, m.payload);
 
             // Registrar la esfera en NVS (si no existía)
-            (void)esfera_manager_register_mac(mac_str);
+            esp_err_t register_err = esfera_manager_register_mac(mac_str);
+            if (register_err != ESP_OK) {
+                ESP_LOGE(TAG, "No se pudo registrar %s: %s", mac_str, esp_err_to_name(register_err));
+                continue;
+            }
 
             // Asegurar peer ESP-NOW
             if (!esp_now_is_peer_exist(m.src))
@@ -500,7 +542,11 @@ static void espnow_worker_task(void *arg)
                     .ifidx = WIFI_IF_STA,
                     .encrypt = false};
                 memcpy(peer.peer_addr, m.src, ESP_NOW_ETH_ALEN);
-                esp_now_add_peer(&peer);
+                esp_err_t peer_err = esp_now_add_peer(&peer);
+                if (peer_err != ESP_OK && peer_err != ESP_ERR_ESPNOW_EXIST) {
+                    ESP_LOGE(TAG, "No se pudo registrar peer %s: %s", mac_str, esp_err_to_name(peer_err));
+                    continue;
+                }
             }
 
             vTaskDelay(pdMS_TO_TICKS(500)); // Espero 500 ms antes de enviar
@@ -512,15 +558,49 @@ static void espnow_worker_task(void *arg)
         }
 
         // 2) Datos → agrega al buffer
-        esfera_manager_add(m.payload, mac_str);
+        if (!esfera_manager_is_registered(mac_str)) {
+            ESP_LOGW(TAG, "Telemetría rechazada de dispositivo no registrado: %s", mac_str);
+            continue;
+        }
+        esp_err_t add_err = esfera_manager_add(m.payload, mac_str);
+        if (add_err != ESP_OK) {
+            ESP_LOGW(TAG, "Telemetría de %s descartada: %s", mac_str, esp_err_to_name(add_err));
+        }
     }
 }
 
 // ============================================================
 //   INICIALIZACIÓN Y PUBLICACIÓN MQTT
 // ============================================================
-void mqtt_manager_init(void)
+esp_err_t mqtt_manager_init_espnow_processing(void)
 {
+    if (s_espnow_rx_q != NULL) {
+        return ESP_OK;
+    }
+
+    s_espnow_rx_q = xQueueCreate(64, sizeof(espnow_rx_msg_t));
+    if (s_espnow_rx_q == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    BaseType_t created = xTaskCreatePinnedToCore(espnow_worker_task, "espnow_worker", 4096,
+                                                 NULL, 15, NULL, tskNO_AFFINITY);
+    if (created != pdPASS) {
+        vQueueDelete(s_espnow_rx_q);
+        s_espnow_rx_q = NULL;
+        return ESP_ERR_NO_MEM;
+    }
+
+    return ESP_OK;
+}
+
+esp_err_t mqtt_manager_init(void)
+{
+    if (client) {
+        ESP_LOGW(TAG, "Cliente MQTT ya iniciado");
+        return ESP_OK;
+    }
+
     snprintf(topic_public, sizeof(topic_public), "ismart/app/%s", mac_local);
     snprintf(topic_suscripcion, sizeof(topic_suscripcion), "ismart/hub/%s", mac_local);
     ESP_LOGI(TAG, "📡 Topic suscripción: %s", topic_suscripcion);
@@ -550,22 +630,53 @@ void mqtt_manager_init(void)
     if (client == NULL)
     {
         ESP_LOGE(TAG, "❌ No se pudo inicializar el cliente MQTT");
-        return;
+        return ESP_ERR_NO_MEM;
     }
 
-    esp_mqtt_client_register_event(client, ESP_EVENT_ANY_ID, mqtt_event_handler, NULL);
-    ESP_ERROR_CHECK(esp_mqtt_client_start(client));
-
-    if (!s_espnow_rx_q)
-    {
-        s_espnow_rx_q = xQueueCreate(64, sizeof(espnow_rx_msg_t));
-        xTaskCreatePinnedToCore(espnow_worker_task, "espnow_worker", 4096, NULL, 15, NULL, tskNO_AFFINITY);
+    esp_err_t err = esp_mqtt_client_register_event(client, ESP_EVENT_ANY_ID, mqtt_event_handler, NULL);
+    if (err == ESP_OK) {
+        err = esp_mqtt_client_start(client);
     }
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "No se pudo arrancar MQTT: %s", esp_err_to_name(err));
+        esp_mqtt_client_destroy(client);
+        client = NULL;
+        return err;
+    }
+
     ESP_LOGI(TAG, "✅ Cliente MQTT iniciado");
+    return ESP_OK;
+}
+
+esp_err_t mqtt_manager_stop(void)
+{
+    if (!client) {
+        return ESP_OK;
+    }
+
+    ESP_LOGI(TAG, "Deteniendo cliente MQTT");
+    esp_err_t err = esp_mqtt_client_stop(client);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "No se pudo detener MQTT: %s", esp_err_to_name(err));
+        return err;
+    }
+    err = esp_mqtt_client_destroy(client);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "No se pudo destruir MQTT: %s", esp_err_to_name(err));
+        return err;
+    }
+    client = NULL;
+    s_pending_telemetry_msg_id = -1;
+    s_pending_telemetry_count = 0;
+    return ESP_OK;
 }
 
 void mqtt_manager_publicar_datos(const char *mac, float temperatura, float humedad, float voltaje, int riego)
 {
+    if (client == NULL) {
+        ESP_LOGW(TAG, "MQTT no iniciado; no se publican datos");
+        return;
+    }
     char payload[256];
     snprintf(payload, sizeof(payload),
              "temperatura,device=%s value=%.2f\n"

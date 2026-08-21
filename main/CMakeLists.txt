@@ -18,4 +18,5 @@ idf_component_register(
         time_sync
         detector_manager
         button_manager
+        app_mode_manager
 )

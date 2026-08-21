@@ -14,6 +14,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
+#include <sys/time.h>
+#include <time.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
@@ -30,8 +33,10 @@
 #include "esp_blufi_api.h"
 #include "blufi_manager.h"
 #include "esp_blufi.h"
+#include "cJSON.h"
+#include "app_mode_manager.h"
+#include "esfera_manager.h"
 
-#define EXAMPLE_WIFI_CONNECTION_MAXIMUM_RETRY 3
 #define EXAMPLE_INVALID_REASON 255
 #define EXAMPLE_INVALID_RSSI -128
 
@@ -50,7 +55,6 @@ static EventGroupHandle_t wifi_event_group;
    to the AP with an IP? */
 const int CONNECTED_BIT = BIT0;
 
-static uint8_t example_wifi_retry = 0;
 
 /* store the station info for send back to phone */
 static bool gl_sta_connected = false;
@@ -66,15 +70,201 @@ static esp_blufi_extra_info_t gl_sta_conn_info;
 extern SemaphoreHandle_t semaforo_wifi_listo;
 extern char mac_local[13];
 
+static void blufi_send_json_response(const char *cmd, const char *status, const char *field, const char *value, const char *error)
+{
+    char response[160];
+    int len;
+
+    if (error != NULL) {
+        len = snprintf(response, sizeof(response),
+                       "{\"cmd\":\"%s\",\"status\":\"%s\",\"error\":\"%s\"}",
+                       cmd, status, error);
+    } else if (field != NULL && value != NULL) {
+        len = snprintf(response, sizeof(response),
+                       "{\"cmd\":\"%s\",\"status\":\"%s\",\"%s\":\"%s\"}",
+                       cmd, status, field, value);
+    } else {
+        len = snprintf(response, sizeof(response),
+                       "{\"cmd\":\"%s\",\"status\":\"%s\"}",
+                       cmd, status);
+    }
+
+    if (len <= 0 || len >= (int)sizeof(response)) {
+        BLUFI_ERROR("No se pudo generar respuesta BLUFI\n");
+        return;
+    }
+
+    esp_blufi_send_custom_data((uint8_t *)response, strlen(response));
+}
+
+static void blufi_send_mode_response(const char *cmd, const char *status, app_mode_t mode, const char *error)
+{
+    blufi_send_json_response(cmd, status, "mode", app_mode_manager_to_string(mode), error);
+}
+
+static void blufi_set_system_time(time_t unix_time, const char *timezone)
+{
+    struct timeval tv = {
+        .tv_sec = unix_time,
+        .tv_usec = 0,
+    };
+
+    settimeofday(&tv, NULL);
+
+    if (timezone != NULL && timezone[0] != '\0') {
+        setenv("TZ", timezone, 1);
+        tzset();
+    }
+}
+
+static void blufi_handle_custom_json(const uint8_t *data, uint32_t data_len)
+{
+    if (data == NULL || data_len == 0 || data_len > 512) {
+        blufi_send_mode_response("unknown", "error", APP_MODE_OFFLINE, "invalid_length");
+        return;
+    }
+
+    cJSON *root = cJSON_ParseWithLength((const char *)data, data_len);
+    if (root == NULL) {
+        blufi_send_mode_response("unknown", "error", APP_MODE_OFFLINE, "invalid_json");
+        return;
+    }
+
+    cJSON *data_item = cJSON_GetObjectItemCaseSensitive(root, "Data");
+    if (data_item != NULL && !cJSON_IsBool(data_item)) {
+        cJSON_Delete(root);
+        blufi_send_json_response("get_data", "error", NULL, NULL, "invalid_data_request");
+        return;
+    }
+    if (cJSON_IsTrue(data_item)) {
+        size_t entry_count = 0;
+        char *json = esfera_manager_generate_json(&entry_count);
+        cJSON_Delete(root);
+        if (json == NULL) {
+            blufi_send_json_response("get_data", "error", NULL, NULL, "no_memory");
+            return;
+        }
+
+        esp_err_t send_err = esp_blufi_send_custom_data((uint8_t *)json, strlen(json));
+        free(json);
+        if (send_err != ESP_OK) {
+            BLUFI_ERROR("No se pudo enviar telemetría por BLUFI: %s\n", esp_err_to_name(send_err));
+            return;
+        }
+
+        if (entry_count > 0) {
+            esp_err_t remove_err = esfera_manager_remove_oldest(entry_count);
+            if (remove_err != ESP_OK) {
+                BLUFI_ERROR("Telemetría enviada, pero no retirada de NVS: %s\n", esp_err_to_name(remove_err));
+            }
+        }
+        return;
+    }
+
+    cJSON *mac_item = cJSON_GetObjectItemCaseSensitive(root, "MACSLAVE");
+    if (mac_item != NULL) {
+        char mac[13];
+        esp_err_t err = esfera_manager_store_config((const char *)data, data_len, mac);
+        cJSON_Delete(root);
+        if (err != ESP_OK) {
+            blufi_send_json_response("set_config", "error", NULL, NULL, esp_err_to_name(err));
+            return;
+        }
+        blufi_send_json_response("set_config", "ok", "MACSLAVE", mac, NULL);
+        return;
+    }
+
+    cJSON *cmd_item = cJSON_GetObjectItem(root, "cmd");
+    if (!cJSON_IsString(cmd_item)) {
+        cJSON_Delete(root);
+        blufi_send_mode_response("unknown", "error", APP_MODE_OFFLINE, "missing_cmd");
+        return;
+    }
+
+    if (strlen(cmd_item->valuestring) >= 24) {
+        cJSON_Delete(root);
+        blufi_send_mode_response("unknown", "error", APP_MODE_OFFLINE, "invalid_cmd");
+        return;
+    }
+    char cmd[24];
+    strcpy(cmd, cmd_item->valuestring);
+    if (strcmp(cmd, "get_mode") == 0) {
+        app_mode_t mode = APP_MODE_OFFLINE;
+        esp_err_t err = app_mode_manager_get(&mode);
+        cJSON_Delete(root);
+        if (err != ESP_OK) {
+            blufi_send_mode_response(cmd, "error", mode, esp_err_to_name(err));
+            return;
+        }
+        blufi_send_mode_response(cmd, "ok", mode, NULL);
+        return;
+    }
+
+    if (strcmp(cmd, "set_mode") == 0) {
+        cJSON *mode_item = cJSON_GetObjectItem(root, "mode");
+        app_mode_t mode = APP_MODE_OFFLINE;
+
+        if (!cJSON_IsString(mode_item) || app_mode_manager_parse(mode_item->valuestring, &mode) != ESP_OK) {
+            cJSON_Delete(root);
+            blufi_send_mode_response(cmd, "error", mode, "invalid_mode");
+            return;
+        }
+
+        esp_err_t err = app_mode_manager_set(mode);
+        cJSON_Delete(root);
+        if (err != ESP_OK) {
+            blufi_send_mode_response(cmd, "error", mode, esp_err_to_name(err));
+            return;
+        }
+
+        if (mode == APP_MODE_ONLINE) {
+            esp_err_t wifi_err = esp_wifi_connect();
+            if (wifi_err != ESP_OK) {
+                BLUFI_ERROR("No se pudo solicitar conexión Wi-Fi: %s\n", esp_err_to_name(wifi_err));
+            }
+        } else {
+            esp_wifi_disconnect();
+        }
+
+        blufi_send_mode_response(cmd, "ok", mode, NULL);
+        return;
+    }
+
+    if (strcmp(cmd, "set_time") == 0) {
+        cJSON *unix_item = cJSON_GetObjectItem(root, "unix");
+        cJSON *tz_item = cJSON_GetObjectItem(root, "tz");
+
+        if (!cJSON_IsNumber(unix_item) || !isfinite(unix_item->valuedouble) ||
+            unix_item->valuedouble < 1577836800.0 || unix_item->valuedouble > 4102444800.0) {
+            cJSON_Delete(root);
+            blufi_send_json_response(cmd, "error", NULL, NULL, "invalid_unix");
+            return;
+        }
+
+        const char *timezone = NULL;
+        if (cJSON_IsString(tz_item) && strlen(tz_item->valuestring) <= 63) {
+            timezone = tz_item->valuestring;
+        } else if (tz_item != NULL) {
+            cJSON_Delete(root);
+            blufi_send_json_response(cmd, "error", NULL, NULL, "invalid_timezone");
+            return;
+        }
+
+        blufi_set_system_time((time_t)unix_item->valuedouble, timezone);
+        cJSON_Delete(root);
+        blufi_send_json_response(cmd, "ok", NULL, NULL, NULL);
+        BLUFI_INFO("Hora configurada desde BLE\n");
+        return;
+    }
+
+    cJSON_Delete(root);
+    blufi_send_mode_response(cmd, "error", APP_MODE_OFFLINE, "unknown_cmd");
+}
+
 static void example_record_wifi_conn_info(int rssi, uint8_t reason)
 {
     memset(&gl_sta_conn_info, 0, sizeof(esp_blufi_extra_info_t));
-    if (gl_sta_is_connecting)
-    {
-        gl_sta_conn_info.sta_max_conn_retry_set = true;
-        gl_sta_conn_info.sta_max_conn_retry = EXAMPLE_WIFI_CONNECTION_MAXIMUM_RETRY;
-    }
-    else
+    if (!gl_sta_is_connecting)
     {
         gl_sta_conn_info.sta_conn_rssi_set = true;
         gl_sta_conn_info.sta_conn_rssi = rssi;
@@ -85,26 +275,8 @@ static void example_record_wifi_conn_info(int rssi, uint8_t reason)
 
 static void example_wifi_connect(void)
 {
-    example_wifi_retry = 0;
     gl_sta_is_connecting = (esp_wifi_connect() == ESP_OK);
     example_record_wifi_conn_info(EXAMPLE_INVALID_RSSI, EXAMPLE_INVALID_REASON);
-}
-
-static bool example_wifi_reconnect(void)
-{
-    bool ret;
-    if (gl_sta_is_connecting && example_wifi_retry++ < EXAMPLE_WIFI_CONNECTION_MAXIMUM_RETRY)
-    {
-        BLUFI_INFO("BLUFI WiFi starts reconnection\n");
-        gl_sta_is_connecting = (esp_wifi_connect() == ESP_OK);
-        example_record_wifi_conn_info(EXAMPLE_INVALID_RSSI, EXAMPLE_INVALID_REASON);
-        ret = true;
-    }
-    else
-    {
-        ret = false;
-    }
-    return ret;
 }
 
 static int softap_get_current_connection_number(void)
@@ -169,8 +341,13 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
     switch (event_id)
     {
     case WIFI_EVENT_STA_START:
-        example_wifi_connect();
+    {
+        app_mode_t current_mode = APP_MODE_OFFLINE;
+        if (app_mode_manager_get(&current_mode) == ESP_OK && current_mode == APP_MODE_ONLINE) {
+            example_wifi_connect();
+        }
         break;
+    }
     case WIFI_EVENT_STA_CONNECTED:
         gl_sta_connected = true;
         gl_sta_is_connecting = false;
@@ -180,15 +357,25 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
         gl_sta_ssid_len = event->ssid_len;
         break;
     case WIFI_EVENT_STA_DISCONNECTED:
-        /* Only handle reconnection during connecting */
-        if (gl_sta_connected == false && example_wifi_reconnect() == false)
-        {
+    {
+        disconnected_event = (wifi_event_sta_disconnected_t *)event_data;
+        example_record_wifi_conn_info(disconnected_event->rssi, disconnected_event->reason);
+
+        app_mode_t current_mode = APP_MODE_OFFLINE;
+        if (app_mode_manager_get(&current_mode) == ESP_OK && current_mode == APP_MODE_ONLINE) {
+            gl_sta_is_connecting = (esp_wifi_connect() == ESP_OK);
+            if (gl_sta_is_connecting) {
+                BLUFI_INFO("Wi-Fi desconectado; reconexión solicitada\n");
+            }
+        } else {
             gl_sta_is_connecting = false;
-            disconnected_event = (wifi_event_sta_disconnected_t *)event_data;
-            example_record_wifi_conn_info(disconnected_event->rssi, disconnected_event->reason);
         }
 
-        esp_blufi_send_wifi_conn_report(mode, ESP_BLUFI_STA_CONN_FAIL, softap_get_current_connection_number(), &gl_sta_conn_info);
+        esp_wifi_get_mode(&mode);
+        if (ble_is_connected) {
+            esp_blufi_send_wifi_conn_report(mode, ESP_BLUFI_STA_CONN_FAIL,
+                                            softap_get_current_connection_number(), &gl_sta_conn_info);
+        }
 
         /* This is a workaround as ESP32 WiFi libs don't currently
            auto-reassociate. */
@@ -199,6 +386,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
         gl_sta_ssid_len = 0;
         xEventGroupClearBits(wifi_event_group, CONNECTED_BIT);
         break;
+    }
     case WIFI_EVENT_AP_START:
         esp_wifi_get_mode(&mode);
 
@@ -312,6 +500,14 @@ static void initialise_wifi(void)
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     example_record_wifi_conn_info(EXAMPLE_INVALID_RSSI, EXAMPLE_INVALID_REASON);
     ESP_ERROR_CHECK(esp_wifi_start());
+
+    app_mode_t current_mode = APP_MODE_OFFLINE;
+    if (app_mode_manager_get(&current_mode) == ESP_OK && current_mode == APP_MODE_OFFLINE) {
+        esp_err_t channel_err = esp_wifi_set_channel(6, WIFI_SECOND_CHAN_NONE);
+        if (channel_err != ESP_OK) {
+            BLUFI_ERROR("No se pudo fijar el canal ESP-NOW offline: %s\n", esp_err_to_name(channel_err));
+        }
+    }
 }
 
 static esp_blufi_callbacks_t example_callbacks = {
@@ -412,21 +608,35 @@ static void example_event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_para
         BLUFI_INFO("Recv STA BSSID %s\n", sta_config.sta.ssid);
         break;
     case ESP_BLUFI_EVENT_RECV_STA_SSID:
-        strncpy((char *)sta_config.sta.ssid, (char *)param->sta_ssid.ssid, param->sta_ssid.ssid_len);
-        sta_config.sta.ssid[param->sta_ssid.ssid_len] = '\0';
+    {
+        size_t ssid_len = param->sta_ssid.ssid_len;
+        if (ssid_len == 0 || ssid_len > sizeof(sta_config.sta.ssid)) {
+            esp_blufi_send_error_info(ESP_BLUFI_DATA_FORMAT_ERROR);
+            break;
+        }
+        memset(sta_config.sta.ssid, 0, sizeof(sta_config.sta.ssid));
+        memcpy(sta_config.sta.ssid, param->sta_ssid.ssid, ssid_len);
         sta_config.sta.scan_method = WIFI_FAST_SCAN; // usa solo el canal indicado
         sta_config.sta.channel = 6;                  // fuerza canal 6
         esp_wifi_set_config(WIFI_IF_STA, &sta_config);
-        BLUFI_INFO("Recv STA SSID %s\n", sta_config.sta.ssid);
+        BLUFI_INFO("Recv STA SSID %.*s\n", (int)ssid_len, sta_config.sta.ssid);
         break;
+    }
     case ESP_BLUFI_EVENT_RECV_STA_PASSWD:
-        strncpy((char *)sta_config.sta.password, (char *)param->sta_passwd.passwd, param->sta_passwd.passwd_len);
-        sta_config.sta.password[param->sta_passwd.passwd_len] = '\0';
+    {
+        size_t password_len = param->sta_passwd.passwd_len;
+        if (password_len > sizeof(sta_config.sta.password)) {
+            esp_blufi_send_error_info(ESP_BLUFI_DATA_FORMAT_ERROR);
+            break;
+        }
+        memset(sta_config.sta.password, 0, sizeof(sta_config.sta.password));
+        memcpy(sta_config.sta.password, param->sta_passwd.passwd, password_len);
         sta_config.sta.scan_method = WIFI_FAST_SCAN; // usa solo el canal indicado
         sta_config.sta.channel = 6;                  // fuerza canal 6
         esp_wifi_set_config(WIFI_IF_STA, &sta_config);
-        BLUFI_INFO("Recv STA PASSWORD %s\n", sta_config.sta.password);
+        BLUFI_INFO("Recv STA PASSWORD len=%u\n", (unsigned)password_len);
         break;
+    }
     case ESP_BLUFI_EVENT_RECV_SOFTAP_SSID:
         strncpy((char *)ap_config.ap.ssid, (char *)param->softap_ssid.ssid, param->softap_ssid.ssid_len);
         ap_config.ap.ssid[param->softap_ssid.ssid_len] = '\0';
@@ -442,7 +652,7 @@ static void example_event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_para
         sta_config.sta.scan_method = WIFI_FAST_SCAN; // usa solo el canal indicado
         sta_config.sta.channel = 6;                  // fuerza canal 6
         esp_wifi_set_config(WIFI_IF_AP, &ap_config);
-        BLUFI_INFO("Recv SOFTAP PASSWORD %s len = %d\n", ap_config.ap.password, param->softap_passwd.passwd_len);
+        BLUFI_INFO("Recv SOFTAP PASSWORD len=%d\n", param->softap_passwd.passwd_len);
         break;
     case ESP_BLUFI_EVENT_RECV_SOFTAP_MAX_CONN_NUM:
         if (param->softap_max_conn_num.max_conn_num > 4)
@@ -493,7 +703,7 @@ static void example_event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_para
     }
     case ESP_BLUFI_EVENT_RECV_CUSTOM_DATA:
         BLUFI_INFO("Recv Custom Data %" PRIu32 "\n", param->custom_data.data_len);
-        ESP_LOG_BUFFER_HEX("Custom Data", param->custom_data.data, param->custom_data.data_len);
+        blufi_handle_custom_json(param->custom_data.data, param->custom_data.data_len);
         break;
     case ESP_BLUFI_EVENT_RECV_USERNAME:
         /* Not handle currently */
@@ -519,18 +729,9 @@ static void example_event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_para
     }
 }
 
-void blufi_init(void)
+esp_err_t blufi_init(void)
 {
     esp_err_t ret;
-
-    // Initialize NVS
-    ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND)
-    {
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        ret = nvs_flash_init();
-    }
-    ESP_ERROR_CHECK(ret);
 
     initialise_wifi();
 
@@ -539,7 +740,7 @@ void blufi_init(void)
     if (ret)
     {
         BLUFI_ERROR("%s BLUFI controller init failed: %s\n", __func__, esp_err_to_name(ret));
-        return;
+        return ret;
     }
 #endif
 
@@ -547,8 +748,9 @@ void blufi_init(void)
     if (ret)
     {
         BLUFI_ERROR("%s initialise failed: %s\n", __func__, esp_err_to_name(ret));
-        return;
+        return ret;
     }
 
     BLUFI_INFO("BLUFI VERSION %04x\n", esp_blufi_get_version());
+    return ESP_OK;
 }

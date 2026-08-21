@@ -9,6 +9,7 @@
 extern SemaphoreHandle_t semaforo_time_listo;
 
 static bool time_synced = false;
+static bool time_sync_started = false;
 
 static void time_sync_notification_cb(struct timeval *tv)
 {
@@ -19,6 +20,10 @@ static void time_sync_notification_cb(struct timeval *tv)
 
 void time_sync_init(const char *timezone)
 {
+    if (time_sync_started) {
+        return;
+    }
+
     ESP_LOGI(TAG, "Inicializando sincronización de hora...");
 
     setenv("TZ", timezone, 1);
@@ -28,6 +33,7 @@ void time_sync_init(const char *timezone)
     esp_sntp_setservername(0, "pool.ntp.org");
     esp_sntp_set_time_sync_notification_cb(time_sync_notification_cb);
     esp_sntp_init();
+    time_sync_started = true;
 }   
 
 bool time_sync_is_synchronized(void)
