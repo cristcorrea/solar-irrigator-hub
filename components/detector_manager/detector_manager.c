@@ -4,13 +4,19 @@
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "hub_station.h"
+#include <stdatomic.h>
 
 
 
 #define DEV_DETEC_GPIO  GPIO_NUM_5  
 #define PS_ENB_GPIO     GPIO_NUM_4  
+#define DISCOVERY_START_DELAY_MS 100
+#define DISCOVERY_RETRY_MS       500
+#define DISCOVERY_TIMEOUT_MS     20000
 
 static const char *TAG = "detector_manager";
+static TaskHandle_t detector_task_handle;
+static atomic_bool discovery_active = ATOMIC_VAR_INIT(false);
 
 static void detector_task(void *arg)
 {
@@ -19,17 +25,47 @@ static void detector_task(void *arg)
     while (1) {
         int current_level = gpio_get_level(DEV_DETEC_GPIO);
         if (last_level == 1 && current_level == 0){
-            gpio_set_level(PS_ENB_GPIO, current_level == 0 ? 1 : 0);
+            gpio_set_level(PS_ENB_GPIO, 1);
             ESP_LOGI(TAG, "Esfera detectada con éxito!");
             // Pequeño retardo para que la esfera empiece a arrancar
-            vTaskDelay(pdMS_TO_TICKS(100)); // opcional, 50–200 ms
+            ulTaskNotifyTake(pdTRUE, 0);
+            vTaskDelay(pdMS_TO_TICKS(DISCOVERY_START_DELAY_MS));
 
-            // Enviar mensaje broadcast ESP-NOW de descubrimiento
-            hub_enviar_broadcast_descubrimiento(); // <<< NUEVO
+            // Abrir una ventana de descubrimiento limitada a 20 segundos.
+            TickType_t discovery_start = xTaskGetTickCount();
+            atomic_store(&discovery_active, true);
+            while (gpio_get_level(DEV_DETEC_GPIO) == 0 &&
+                   (xTaskGetTickCount() - discovery_start) < pdMS_TO_TICKS(DISCOVERY_TIMEOUT_MS)) {
+                hub_enviar_broadcast_descubrimiento();
+                if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(DISCOVERY_RETRY_MS)) > 0) {
+                    ESP_LOGI(TAG, "Respuesta recibida; fin del descubrimiento");
+                    break;
+                }
+            }
+            bool was_active = atomic_exchange(&discovery_active, false);
+            if (was_active && gpio_get_level(DEV_DETEC_GPIO) == 0) {
+                ESP_LOGW(TAG, "Tiempo de descubrimiento agotado tras %d segundos",
+                         DISCOVERY_TIMEOUT_MS / 1000);
+            }
+        } else if (last_level == 0 && current_level == 1) {
+            gpio_set_level(PS_ENB_GPIO, 0);
+            ESP_LOGI(TAG, "Esfera desconectada");
         }
-        last_level = current_level; 
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        last_level = gpio_get_level(DEV_DETEC_GPIO);
+        vTaskDelay(pdMS_TO_TICKS(100));
     }
+}
+
+bool detector_manager_accept_esfera_response(void)
+{
+    if (!atomic_exchange(&discovery_active, false)) {
+        return false;
+    }
+
+    if (detector_task_handle != NULL) {
+        xTaskNotifyGive(detector_task_handle);
+    }
+    return true;
 }
 
 void detector_manager_init(void)
@@ -58,5 +94,10 @@ void detector_manager_init(void)
     gpio_set_level(PS_ENB_GPIO, 0);  // Apagar al inicio
 
     // Crear la tarea de detección
-    xTaskCreate(detector_task, "detector_task", 4096, NULL, 5, NULL);
+    BaseType_t created = xTaskCreate(detector_task, "detector_task", 4096, NULL, 5,
+                                     &detector_task_handle);
+    if (created != pdPASS) {
+        detector_task_handle = NULL;
+        ESP_LOGE(TAG, "No se pudo crear la tarea de deteccion");
+    }
 }

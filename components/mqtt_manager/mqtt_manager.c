@@ -52,7 +52,8 @@ static const char *default_config_json =
 static esp_err_t mqtt_event_handler_cb(esp_mqtt_event_handle_t event);
 static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data);
 static void procesar_configuracion_esfera(const char *payload);
-static void intentar_enviar_configuracion_a_esfera(const char *mac_str, const uint8_t *mac_bin);
+static void intentar_enviar_configuracion_a_esfera(const char *mac_str, const uint8_t *mac_bin,
+                                                   bool force_send);
 static void procesar_mensaje_ctrl_esfera(const char *mac_str, const char *payload);
 
 // Helper: convierte "A085E369D6AC" -> uint8_t[6]
@@ -133,7 +134,8 @@ static esp_err_t cfg_ack_set_applied(const char *mac_clean, bool applied)
 // ============================================================
 //   ENVÍO DE CONFIGURACIÓN A UNA ESFERA
 // ============================================================
-static void intentar_enviar_configuracion_a_esfera(const char *mac_str, const uint8_t *mac_bin)
+static void intentar_enviar_configuracion_a_esfera(const char *mac_str, const uint8_t *mac_bin,
+                                                   bool force_send)
 {
 
     esp_err_t send_result;
@@ -145,7 +147,7 @@ static void intentar_enviar_configuracion_a_esfera(const char *mac_str, const ui
     }
 
     // --- NUEVO: no enviar si ya aplicada ---
-    if (cfg_ack_is_applied(mac_clean))
+    if (!force_send && cfg_ack_is_applied(mac_clean))
     {
         ESP_LOGI(TAG, "🧩 (skip) Config de %s ya aplicada (ACK en NVS).", mac_str);
         return;
@@ -506,6 +508,8 @@ static void espnow_worker_task(void *arg)
         snprintf(mac_str, sizeof(mac_str), "%02X%02X%02X%02X%02X%02X",
                  m.src[0], m.src[1], m.src[2], m.src[3], m.src[4], m.src[5]);
 
+        ESP_LOGI(TAG, "Mensaje ESP-NOW recibido de %s: '%s'", mac_str, m.payload);
+
         // 1) Control de config (CFG_OK / CFG_ERR) para no romper el parser de datos
         if (strncmp(m.payload, "CFG_", 4) == 0)
         {
@@ -523,6 +527,12 @@ static void espnow_worker_task(void *arg)
             char claimed_mac[13];
             if (!normalize_mac(m.payload + 10, claimed_mac) || strcmp(claimed_mac, mac_str) != 0) {
                 ESP_LOGW(TAG, "HELLO_HUB rechazado: MAC declarada no coincide con remitente %s", mac_str);
+                continue;
+            }
+
+            if (!hub_aceptar_respuesta_esfera()) {
+                ESP_LOGW(TAG, "HELLO_HUB rechazado fuera de la ventana de emparejamiento: %s",
+                         mac_str);
                 continue;
             }
 
@@ -551,7 +561,7 @@ static void espnow_worker_task(void *arg)
 
             vTaskDelay(pdMS_TO_TICKS(500)); // Espero 500 ms antes de enviar
             // Enviar la configuración (estándar o específica) a la esfera
-            intentar_enviar_configuracion_a_esfera(mac_str, m.src);
+            intentar_enviar_configuracion_a_esfera(mac_str, m.src, false);
 
             // Muy importante: NO pasar este mensaje a esfera_manager_add()
             continue;
@@ -565,7 +575,25 @@ static void espnow_worker_task(void *arg)
         esp_err_t add_err = esfera_manager_add(m.payload, mac_str);
         if (add_err != ESP_OK) {
             ESP_LOGW(TAG, "Telemetría de %s descartada: %s", mac_str, esp_err_to_name(add_err));
+            continue;
         }
+
+        if (!esp_now_is_peer_exist(m.src)) {
+            esp_now_peer_info_t peer = {
+                .ifidx = WIFI_IF_STA,
+                .encrypt = false,
+            };
+            memcpy(peer.peer_addr, m.src, ESP_NOW_ETH_ALEN);
+            esp_err_t peer_err = esp_now_add_peer(&peer);
+            if (peer_err != ESP_OK && peer_err != ESP_ERR_ESPNOW_EXIST) {
+                ESP_LOGE(TAG, "No se pudo registrar peer %s para enviar configuración: %s",
+                         mac_str, esp_err_to_name(peer_err));
+                continue;
+            }
+        }
+
+        ESP_LOGI(TAG, "Telemetría almacenada; enviando configuración a %s", mac_str);
+        intentar_enviar_configuracion_a_esfera(mac_str, m.src, true);
     }
 }
 
@@ -615,6 +643,7 @@ esp_err_t mqtt_manager_init(void)
                 .skip_cert_common_name_check = false,
             },
         },
+        
         .credentials = {
             .username = MQTT_USERNAME,
             .client_id = mac_local,

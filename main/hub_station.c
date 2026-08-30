@@ -122,6 +122,11 @@ void hub_enviar_broadcast_descubrimiento(void)
     }
 }
 
+bool hub_aceptar_respuesta_esfera(void)
+{
+    return detector_manager_accept_esfera_response();
+}
+
 static bool hub_wifi_is_connected(void)
 {
     wifi_ap_record_t ap_info;
@@ -216,6 +221,7 @@ void app_main(void)
 
     hub_init_nvs();
     ESP_ERROR_CHECK(app_mode_manager_init());
+    ESP_ERROR_CHECK(app_mode_manager_set(APP_MODE_ONLINE));
     ESP_ERROR_CHECK(esfera_manager_init());
 
     app_mode_t app_mode = APP_MODE_OFFLINE;
