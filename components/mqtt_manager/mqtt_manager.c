@@ -10,6 +10,7 @@
 #include "esfera_manager.h"
 #include "freertos/queue.h"
 #include <time.h>
+#include <math.h>
 
 #define TAG "MQTT_MANAGER"
 
@@ -32,7 +33,8 @@ extern char mac_local[13]; // Formato XX:XX:XX:XX:XX:XX
 
 static esp_mqtt_client_handle_t client = NULL;
 static int s_pending_telemetry_msg_id = -1;
-static size_t s_pending_telemetry_count = 0;
+static uint32_t s_pending_page_id = 0;
+static uint32_t s_pending_last_seq = 0;
 
 // --- Certificados (definidos en mqtt_secrets.h) ---
 extern const uint8_t ca_cert_pem_start[] asm("_binary_ca_cert_pem_start");
@@ -335,8 +337,20 @@ static esp_err_t mqtt_event_handler_cb(esp_mqtt_event_handle_t event)
                 break;
             }
 
-            size_t entry_count = 0;
-            char *json_out = esfera_manager_generate_json(&entry_count);
+            size_t max = 50;
+            cJSON *max_item = cJSON_GetObjectItemCaseSensitive(json, "max");
+            if (max_item != NULL) {
+                if (!cJSON_IsNumber(max_item) || max_item->valuedouble < 1 ||
+                    max_item->valuedouble > 100 || max_item->valuedouble != floor(max_item->valuedouble)) {
+                    ESP_LOGW(TAG, "max de telemetría inválido");
+                    cJSON_Delete(json);
+                    break;
+                }
+                max = (size_t)max_item->valueint;
+            }
+            uint32_t page_id = 0, last_seq = 0;
+            size_t pend = 0;
+            char *json_out = esfera_manager_page_json(max, &page_id, &last_seq, &pend);
             if (json_out == NULL) {
                 ESP_LOGE(TAG, "No se pudo generar la respuesta de telemetría");
                 cJSON_Delete(json);
@@ -347,15 +361,67 @@ static esp_err_t mqtt_event_handler_cb(esp_mqtt_event_handle_t event)
             free(json_out);
             if (msg_id < 0) {
                 ESP_LOGE(TAG, "No se pudo encolar la telemetría MQTT; se conserva en NVS");
-            } else if (entry_count > 0) {
+            } else {
                 s_pending_telemetry_msg_id = msg_id;
-                s_pending_telemetry_count = entry_count;
+                s_pending_page_id = page_id;
+                s_pending_last_seq = last_seq;
             }
         }
         else
         {
-            ESP_LOGI(TAG, "⚙️ Configuración recibida");
-            procesar_configuracion_esfera(payload);
+            cJSON *cmd = cJSON_GetObjectItemCaseSensitive(json, "cmd");
+#if CONFIG_TELEMETRY_LOG_TEST_MODE
+            if (cJSON_IsString(cmd) && strcmp(cmd->valuestring, "debug_fill") == 0) {
+                cJSON *hub = cJSON_GetObjectItemCaseSensitive(json, "MACHUB");
+                cJSON *n = cJSON_GetObjectItemCaseSensitive(json, "n");
+                bool valid = cJSON_IsString(hub) && strcmp(hub->valuestring, mac_local) == 0 &&
+                             cJSON_IsNumber(n) && isfinite(n->valuedouble) &&
+                             n->valuedouble >= 1 && n->valuedouble <= 3000 &&
+                             n->valuedouble == floor(n->valuedouble);
+                size_t written = 0;
+                esp_err_t fill_err = valid
+                                         ? esfera_manager_debug_fill((size_t)n->valueint, &written)
+                                         : ESP_ERR_INVALID_ARG;
+                char response[112];
+                snprintf(response, sizeof(response),
+                         "{\"cmd\":\"debug_fill\",\"status\":\"%s\",\"written\":%u}",
+                         fill_err == ESP_OK ? "ok" : "error", (unsigned)written);
+                esp_mqtt_client_publish(event->client, topic_public, response, 0, 1, 0);
+            } else
+#endif
+            if (cJSON_IsString(cmd) && strcmp(cmd->valuestring, "ack_data") == 0) {
+                cJSON *hub = cJSON_GetObjectItemCaseSensitive(json, "MACHUB");
+                cJSON *page = cJSON_GetObjectItemCaseSensitive(json, "page_id");
+                cJSON *seq = cJSON_GetObjectItemCaseSensitive(json, "last_seq");
+                bool valid_ack = cJSON_IsString(hub) && strcmp(hub->valuestring, mac_local) == 0 &&
+                                 cJSON_IsNumber(page) && cJSON_IsNumber(seq) &&
+                                 page->valuedouble >= 0 && page->valuedouble <= UINT32_MAX &&
+                                 seq->valuedouble >= 0 && seq->valuedouble <= UINT32_MAX &&
+                                 page->valuedouble == floor(page->valuedouble) &&
+                                 seq->valuedouble == floor(seq->valuedouble);
+                if (!valid_ack) {
+                    ESP_LOGW(TAG, "ack_data MQTT inválido o dirigido a otro hub");
+                } else {
+                    uint32_t page_id = (uint32_t)page->valuedouble;
+                    uint32_t last_seq = (uint32_t)seq->valuedouble;
+                    esp_err_t ack_err = esfera_manager_ack(page_id, last_seq);
+                    if (ack_err == ESP_OK && page_id == s_pending_page_id &&
+                        last_seq == s_pending_last_seq) {
+                        s_pending_telemetry_msg_id = -1;
+                        s_pending_page_id = 0;
+                        s_pending_last_seq = 0;
+                    }
+                    char response[96];
+                    snprintf(response, sizeof(response),
+                             "{\"cmd\":\"ack_data\",\"status\":\"%s\",\"pend\":%u}",
+                             ack_err == ESP_OK ? "ok" : "error",
+                             (unsigned)esfera_manager_count());
+                    esp_mqtt_client_publish(event->client, topic_public, response, 0, 1, 0);
+                }
+            } else {
+                ESP_LOGI(TAG, "Configuración recibida");
+                procesar_configuracion_esfera(payload);
+            }
         }
 
         cJSON_Delete(json);
@@ -364,15 +430,8 @@ static esp_err_t mqtt_event_handler_cb(esp_mqtt_event_handle_t event)
 
     case MQTT_EVENT_PUBLISHED:
         if (event->msg_id == s_pending_telemetry_msg_id) {
-            esp_err_t err = esfera_manager_remove_oldest(s_pending_telemetry_count);
-            if (err == ESP_OK) {
-                ESP_LOGI(TAG, "Telemetría confirmada por MQTT y retirada de NVS");
-            } else {
-                ESP_LOGE(TAG, "MQTT confirmó datos, pero NVS no pudo actualizarlos: %s",
-                         esp_err_to_name(err));
-            }
+            ESP_LOGI(TAG, "PUBACK de página MQTT recibido; esperando ack_data de la app");
             s_pending_telemetry_msg_id = -1;
-            s_pending_telemetry_count = 0;
         }
         break;
 
@@ -592,7 +651,7 @@ static void espnow_worker_task(void *arg)
             }
         }
 
-        ESP_LOGI(TAG, "Telemetría almacenada; enviando configuración a %s", mac_str);
+        ESP_LOGI(TAG, "Telemetría encolada; enviando configuración a %s", mac_str);
         intentar_enviar_configuracion_a_esfera(mac_str, m.src, true);
     }
 }
@@ -696,7 +755,8 @@ esp_err_t mqtt_manager_stop(void)
     }
     client = NULL;
     s_pending_telemetry_msg_id = -1;
-    s_pending_telemetry_count = 0;
+    s_pending_page_id = 0;
+    s_pending_last_seq = 0;
     return ESP_OK;
 }
 

@@ -12,7 +12,7 @@
 #define PS_ENB_GPIO     GPIO_NUM_4  
 #define DISCOVERY_START_DELAY_MS 100
 #define DISCOVERY_RETRY_MS       500
-#define DISCOVERY_TIMEOUT_MS     20000
+#define DISCOVERY_TIMEOUT_MS     60000
 
 static const char *TAG = "detector_manager";
 static TaskHandle_t detector_task_handle;
@@ -31,7 +31,7 @@ static void detector_task(void *arg)
             ulTaskNotifyTake(pdTRUE, 0);
             vTaskDelay(pdMS_TO_TICKS(DISCOVERY_START_DELAY_MS));
 
-            // Abrir una ventana de descubrimiento limitada a 20 segundos.
+            // Cubrir un barrido completo de los 13 canales de la esfera, con margen.
             TickType_t discovery_start = xTaskGetTickCount();
             atomic_store(&discovery_active, true);
             while (gpio_get_level(DEV_DETEC_GPIO) == 0 &&

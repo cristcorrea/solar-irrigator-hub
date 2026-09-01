@@ -36,6 +36,7 @@
 #include "cJSON.h"
 #include "app_mode_manager.h"
 #include "esfera_manager.h"
+#include "time_sync.h"
 
 #define EXAMPLE_INVALID_REASON 255
 #define EXAMPLE_INVALID_RSSI -128
@@ -102,21 +103,6 @@ static void blufi_send_mode_response(const char *cmd, const char *status, app_mo
     blufi_send_json_response(cmd, status, "mode", app_mode_manager_to_string(mode), error);
 }
 
-static void blufi_set_system_time(time_t unix_time, const char *timezone)
-{
-    struct timeval tv = {
-        .tv_sec = unix_time,
-        .tv_usec = 0,
-    };
-
-    settimeofday(&tv, NULL);
-
-    if (timezone != NULL && timezone[0] != '\0') {
-        setenv("TZ", timezone, 1);
-        tzset();
-    }
-}
-
 static void blufi_handle_custom_json(const uint8_t *data, uint32_t data_len)
 {
     if (data == NULL || data_len == 0 || data_len > 512) {
@@ -137,8 +123,20 @@ static void blufi_handle_custom_json(const uint8_t *data, uint32_t data_len)
         return;
     }
     if (cJSON_IsTrue(data_item)) {
-        size_t entry_count = 0;
-        char *json = esfera_manager_generate_json(&entry_count);
+        size_t max = 50;
+        cJSON *max_item = cJSON_GetObjectItemCaseSensitive(root, "max");
+        if (max_item != NULL) {
+            if (!cJSON_IsNumber(max_item) || max_item->valuedouble < 1 ||
+                max_item->valuedouble > 100 || max_item->valuedouble != floor(max_item->valuedouble)) {
+                cJSON_Delete(root);
+                blufi_send_json_response("get_data", "error", NULL, NULL, "invalid_max");
+                return;
+            }
+            max = (size_t)max_item->valueint;
+        }
+        uint32_t page_id = 0, last_seq = 0;
+        size_t pend = 0;
+        char *json = esfera_manager_page_json(max, &page_id, &last_seq, &pend);
         cJSON_Delete(root);
         if (json == NULL) {
             blufi_send_json_response("get_data", "error", NULL, NULL, "no_memory");
@@ -152,12 +150,6 @@ static void blufi_handle_custom_json(const uint8_t *data, uint32_t data_len)
             return;
         }
 
-        if (entry_count > 0) {
-            esp_err_t remove_err = esfera_manager_remove_oldest(entry_count);
-            if (remove_err != ESP_OK) {
-                BLUFI_ERROR("Telemetría enviada, pero no retirada de NVS: %s\n", esp_err_to_name(remove_err));
-            }
-        }
         return;
     }
 
@@ -188,6 +180,45 @@ static void blufi_handle_custom_json(const uint8_t *data, uint32_t data_len)
     }
     char cmd[24];
     strcpy(cmd, cmd_item->valuestring);
+#if CONFIG_TELEMETRY_LOG_TEST_MODE
+    if (strcmp(cmd, "debug_fill") == 0) {
+        cJSON *hub_item = cJSON_GetObjectItemCaseSensitive(root, "MACHUB");
+        cJSON *n_item = cJSON_GetObjectItemCaseSensitive(root, "n");
+        bool valid = cJSON_IsString(hub_item) && strcmp(hub_item->valuestring, mac_local) == 0 &&
+                     cJSON_IsNumber(n_item) && isfinite(n_item->valuedouble) &&
+                     n_item->valuedouble >= 1 && n_item->valuedouble <= 3000 &&
+                     n_item->valuedouble == floor(n_item->valuedouble);
+        size_t written = 0;
+        esp_err_t err = valid
+                            ? esfera_manager_debug_fill((size_t)n_item->valueint, &written)
+                            : ESP_ERR_INVALID_ARG;
+        cJSON_Delete(root);
+        char response[112];
+        snprintf(response, sizeof(response),
+                 "{\"cmd\":\"debug_fill\",\"status\":\"%s\",\"written\":%u}",
+                 err == ESP_OK ? "ok" : "error", (unsigned)written);
+        esp_blufi_send_custom_data((uint8_t *)response, strlen(response));
+        return;
+    }
+#endif
+    if (strcmp(cmd, "ack_data") == 0) {
+        cJSON *page_item = cJSON_GetObjectItemCaseSensitive(root, "page_id");
+        cJSON *seq_item = cJSON_GetObjectItemCaseSensitive(root, "last_seq");
+        if (!cJSON_IsNumber(page_item) || !cJSON_IsNumber(seq_item)) {
+            cJSON_Delete(root);
+            blufi_send_json_response(cmd, "error", NULL, NULL, "invalid_ack");
+            return;
+        }
+        esp_err_t err = esfera_manager_ack((uint32_t)page_item->valuedouble,
+                                           (uint32_t)seq_item->valuedouble);
+        cJSON_Delete(root);
+        char response[96];
+        snprintf(response, sizeof(response),
+                 "{\"cmd\":\"ack_data\",\"status\":\"%s\",\"pend\":%u}",
+                 err == ESP_OK ? "ok" : "error", (unsigned)esfera_manager_count());
+        esp_blufi_send_custom_data((uint8_t *)response, strlen(response));
+        return;
+    }
     if (strcmp(cmd, "get_mode") == 0) {
         app_mode_t mode = APP_MODE_OFFLINE;
         esp_err_t err = app_mode_manager_get(&mode);
@@ -224,6 +255,10 @@ static void blufi_handle_custom_json(const uint8_t *data, uint32_t data_len)
             }
         } else {
             esp_wifi_disconnect();
+            esp_err_t channel_err = esp_wifi_set_channel(6, WIFI_SECOND_CHAN_NONE);
+            if (channel_err != ESP_OK) {
+                BLUFI_ERROR("No se pudo fijar canal 6 al pasar a offline: %s\n", esp_err_to_name(channel_err));
+            }
         }
 
         blufi_send_mode_response(cmd, "ok", mode, NULL);
@@ -250,8 +285,12 @@ static void blufi_handle_custom_json(const uint8_t *data, uint32_t data_len)
             return;
         }
 
-        blufi_set_system_time((time_t)unix_item->valuedouble, timezone);
+        esp_err_t time_err = time_sync_set((time_t)unix_item->valuedouble, timezone);
         cJSON_Delete(root);
+        if (time_err != ESP_OK) {
+            blufi_send_json_response(cmd, "error", NULL, NULL, esp_err_to_name(time_err));
+            return;
+        }
         blufi_send_json_response(cmd, "ok", NULL, NULL, NULL);
         BLUFI_INFO("Hora configurada desde BLE\n");
         return;
@@ -369,6 +408,10 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
             }
         } else {
             gl_sta_is_connecting = false;
+            esp_err_t channel_err = esp_wifi_set_channel(6, WIFI_SECOND_CHAN_NONE);
+            if (channel_err != ESP_OK) {
+                BLUFI_ERROR("No se pudo fijar canal 6 en modo offline: %s\n", esp_err_to_name(channel_err));
+            }
         }
 
         esp_wifi_get_mode(&mode);
@@ -602,8 +645,6 @@ static void example_event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_para
     case ESP_BLUFI_EVENT_RECV_STA_BSSID:
         memcpy(sta_config.sta.bssid, param->sta_bssid.bssid, 6);
         sta_config.sta.bssid_set = 1;
-        sta_config.sta.scan_method = WIFI_FAST_SCAN; // usa solo el canal indicado
-        sta_config.sta.channel = 6;                  // fuerza canal 6
         esp_wifi_set_config(WIFI_IF_STA, &sta_config);
         BLUFI_INFO("Recv STA BSSID %s\n", sta_config.sta.ssid);
         break;
@@ -616,8 +657,6 @@ static void example_event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_para
         }
         memset(sta_config.sta.ssid, 0, sizeof(sta_config.sta.ssid));
         memcpy(sta_config.sta.ssid, param->sta_ssid.ssid, ssid_len);
-        sta_config.sta.scan_method = WIFI_FAST_SCAN; // usa solo el canal indicado
-        sta_config.sta.channel = 6;                  // fuerza canal 6
         esp_wifi_set_config(WIFI_IF_STA, &sta_config);
         BLUFI_INFO("Recv STA SSID %.*s\n", (int)ssid_len, sta_config.sta.ssid);
         break;
@@ -631,8 +670,6 @@ static void example_event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_para
         }
         memset(sta_config.sta.password, 0, sizeof(sta_config.sta.password));
         memcpy(sta_config.sta.password, param->sta_passwd.passwd, password_len);
-        sta_config.sta.scan_method = WIFI_FAST_SCAN; // usa solo el canal indicado
-        sta_config.sta.channel = 6;                  // fuerza canal 6
         esp_wifi_set_config(WIFI_IF_STA, &sta_config);
         BLUFI_INFO("Recv STA PASSWORD len=%u\n", (unsigned)password_len);
         break;
@@ -641,16 +678,12 @@ static void example_event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_para
         strncpy((char *)ap_config.ap.ssid, (char *)param->softap_ssid.ssid, param->softap_ssid.ssid_len);
         ap_config.ap.ssid[param->softap_ssid.ssid_len] = '\0';
         ap_config.ap.ssid_len = param->softap_ssid.ssid_len;
-        sta_config.sta.scan_method = WIFI_FAST_SCAN; // usa solo el canal indicado
-        sta_config.sta.channel = 6;                  // fuerza canal 6
         esp_wifi_set_config(WIFI_IF_AP, &ap_config);
         BLUFI_INFO("Recv SOFTAP SSID %s, ssid len %d\n", ap_config.ap.ssid, ap_config.ap.ssid_len);
         break;
     case ESP_BLUFI_EVENT_RECV_SOFTAP_PASSWD:
         strncpy((char *)ap_config.ap.password, (char *)param->softap_passwd.passwd, param->softap_passwd.passwd_len);
         ap_config.ap.password[param->softap_passwd.passwd_len] = '\0';
-        sta_config.sta.scan_method = WIFI_FAST_SCAN; // usa solo el canal indicado
-        sta_config.sta.channel = 6;                  // fuerza canal 6
         esp_wifi_set_config(WIFI_IF_AP, &ap_config);
         BLUFI_INFO("Recv SOFTAP PASSWORD len=%d\n", param->softap_passwd.passwd_len);
         break;
@@ -660,8 +693,6 @@ static void example_event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_para
             return;
         }
         ap_config.ap.max_connection = param->softap_max_conn_num.max_conn_num;
-        sta_config.sta.scan_method = WIFI_FAST_SCAN; // usa solo el canal indicado
-        sta_config.sta.channel = 6;                  // fuerza canal 6
         esp_wifi_set_config(WIFI_IF_AP, &ap_config);
         BLUFI_INFO("Recv SOFTAP MAX CONN NUM %d\n", ap_config.ap.max_connection);
         break;
@@ -671,8 +702,6 @@ static void example_event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_para
             return;
         }
         ap_config.ap.authmode = param->softap_auth_mode.auth_mode;
-        sta_config.sta.scan_method = WIFI_FAST_SCAN; // usa solo el canal indicado
-        sta_config.sta.channel = 6;                  // fuerza canal 6
         esp_wifi_set_config(WIFI_IF_AP, &ap_config);
         BLUFI_INFO("Recv SOFTAP AUTH MODE %d\n", ap_config.ap.authmode);
         break;
@@ -682,8 +711,6 @@ static void example_event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_para
             return;
         }
         ap_config.ap.channel = param->softap_channel.channel;
-        sta_config.sta.scan_method = WIFI_FAST_SCAN; // usa solo el canal indicado
-        sta_config.sta.channel = 6;                  // fuerza canal 6
         esp_wifi_set_config(WIFI_IF_AP, &ap_config);
         BLUFI_INFO("Recv SOFTAP CHANNEL %d\n", ap_config.ap.channel);
         break;

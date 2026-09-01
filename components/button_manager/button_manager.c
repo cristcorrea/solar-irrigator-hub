@@ -7,6 +7,7 @@
 #include "esp_log.h"
 #include "nvs_flash.h"
 #include "nvs.h"
+#include "esfera_manager.h"
 
 #define BTN_GPIO                19
 #define DEBOUNCE_US             40000      // 40 ms
@@ -49,11 +50,18 @@ static esp_err_t nvs_erase_namespace_all(const char *ns)
     return err;
 }
 
-static void borrar_esferas_y_config(void)
+static void borrar_esferas_config_y_telemetria(void)
 {
-    // Limpia registro de esferas y configuraciones por MAC
-    nvs_erase_namespace_all("esferas");       // esfera_manager_register_mac() 
-    nvs_erase_namespace_all("config_store");  // procesar_configuracion_esfera() 
+    esp_err_t esferas_err = nvs_erase_namespace_all("esferas");
+    esp_err_t config_err = nvs_erase_namespace_all("config_store");
+    esp_err_t telemetry_err = esfera_manager_erase_all();
+    if (esferas_err == ESP_OK && config_err == ESP_OK && telemetry_err == ESP_OK) {
+        ESP_LOGI(TAG, "Pulsación 3 s: esferas, config_store y telemetry borrados");
+    } else {
+        ESP_LOGE(TAG, "Borrado 3 s incompleto: esferas=%s config=%s telemetry=%s",
+                 esp_err_to_name(esferas_err), esp_err_to_name(config_err),
+                 esp_err_to_name(telemetry_err));
+    }
 }
 
 
@@ -104,14 +112,16 @@ static void button_task(void *arg)
                 ESP_LOGI(TAG, "release, dur=%.0f ms", dur/1000.0);
 
                 if (dur >= VERY_LONG_PRESS_US) {
-                    ESP_LOGW(TAG, "Very long press → ERASE NVS + restart");
-                    // Acciones sensibles SIEMPRE fuera de ISR:
-                    nvs_flash_erase();   // borrar todas las particiones NVS por defecto
-                    nvs_flash_init();    // opcional, para dejar consistente
+                    ESP_LOGW(TAG, "Pulsación 8 s: borrando NVS y partición telemetry");
+                    esp_err_t nvs_err = nvs_flash_erase();
+                    esp_err_t telemetry_err = esfera_manager_erase_all();
+                    ESP_LOGW(TAG, "Borrado 8 s: NVS=%s telemetry=%s; reiniciando",
+                             esp_err_to_name(nvs_err), esp_err_to_name(telemetry_err));
+                    ESP_ERROR_CHECK_WITHOUT_ABORT(nvs_flash_init());
                     esp_restart();
                 } else if (dur >= LONG_PRESS_US) {
-                    ESP_LOGI(TAG, "Long press → borrar 'esferas' y 'config_store' (conserva wifi)");
-                    borrar_esferas_y_config(); 
+                    ESP_LOGI(TAG, "Pulsación 3 s: borrando esferas, config_store y telemetry (conserva Wi-Fi)");
+                    borrar_esferas_config_y_telemetria();
                 } else {
                     ESP_LOGI(TAG, "Short press → acción corta (p.ej. enviar comando MQTT)");
                     // TODO: tu acción (ej. publicar 'S' por MQTT)

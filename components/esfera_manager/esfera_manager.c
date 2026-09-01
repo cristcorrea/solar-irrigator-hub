@@ -11,11 +11,21 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
+#if 0 /* Implementación de blob NVS retirada en etapa 2. */
 #define MAX_ENTRADAS 32
 #define TELEMETRY_NAMESPACE "telemetry"
 #define TELEMETRY_KEY       "pending"
 #define TELEMETRY_MAGIC     0x48554254UL
 #define TELEMETRY_VERSION   1
+
+typedef struct {
+    float humedad;
+    float temperatura;
+    float voltaje;
+    uint8_t riego;
+    char mac[13];
+    char timestamp[20];
+} esfera_data_t;
 
 static const char *TAG = "ESFERA_MANAGER";
 static esfera_data_t buffer[MAX_ENTRADAS];
@@ -52,6 +62,7 @@ static esp_err_t persist_entries_locked(const esfera_data_t *entries, size_t cou
     nvs_close(handle);
     return err;
 }
+#endif
 
 static bool valid_mac(const char *mac)
 {
@@ -91,6 +102,7 @@ static bool normalize_mac(const char *input, char output[13])
     return index == 12;
 }
 
+#if 0 /* Reemplazado por telemetry_log.c; se conserva temporalmente para aislar configuración NVS. */
 esp_err_t esfera_manager_init(void) {
     if (buffer_mutex == NULL) {
         buffer_mutex = xSemaphoreCreateMutex();
@@ -266,6 +278,7 @@ void esfera_manager_clear(void) {
         ESP_LOGE(TAG, "No se pudo limpiar telemetría: %s", esp_err_to_name(err));
     }
 }
+#endif
 
 esp_err_t esfera_manager_store_config(const char *payload, size_t payload_len, char normalized_mac[13])
 {

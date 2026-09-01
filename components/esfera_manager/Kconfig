@@ -1,0 +1,21 @@
+menu "Telemetry log"
+
+config TELEMETRY_LOG_TEST_MODE
+    bool "Enable circular-log test mode"
+    default n
+    help
+        Test-only build option. It limits the circular log to three sectors
+        and compiles the debug_fill MQTT/BLUFI command. Disable this option
+        for production builds.
+
+config TELEMETRY_LOG_SECTOR_COUNT
+    int
+    range 3 128
+    default 3 if TELEMETRY_LOG_TEST_MODE
+    default 128
+    help
+        Derived number of 4 KiB sectors used by the raw telemetry log. One
+        sector is maintained erased as a spare, so the useful capacity is
+        (sector count - 1) * 202 records.
+
+endmenu

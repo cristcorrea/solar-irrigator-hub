@@ -221,7 +221,7 @@ void app_main(void)
 
     hub_init_nvs();
     ESP_ERROR_CHECK(app_mode_manager_init());
-    ESP_ERROR_CHECK(app_mode_manager_set(APP_MODE_ONLINE));
+    ESP_ERROR_CHECK(time_sync_restore());
     ESP_ERROR_CHECK(esfera_manager_init());
 
     app_mode_t app_mode = APP_MODE_OFFLINE;
