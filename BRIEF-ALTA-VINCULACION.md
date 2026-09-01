@@ -57,11 +57,13 @@ El hub, si está `VIRGEN`:
 {"cmd":"begin_alta","status":"ok","mac":"885721A8791C","tok":"<32 hex>"}
 ```
 
-Si ya está `PROVISIONED`:
+Si ya está `PROVISIONED`, responde esto **sin exigir token**: el nombre `SG1-` ya expone ese estado, así que la respuesta no revela nada nuevo.
 
 ```json
 {"cmd":"begin_alta","status":"error","error":"already_provisioned"}
 ```
+
+Si ya está `PENDING`, **reinicia el alta**: emite un token nuevo, descarta el anterior y reinicia el timeout. Cubre el caso de que la app no haya recibido la respuesta y reintente.
 
 **Paso 2 — según el modo**
 
@@ -83,7 +85,18 @@ El hub, si el token coincide y está en `PENDING`:
 {"cmd":"confirm_alta","status":"ok"}
 ```
 
+Errores de `confirm_alta`:
+
+| Situación | Respuesta |
+|---|---|
+| Token incorrecto estando `PENDING` | `{"status":"error","error":"unauthorized"}` |
+| Estando `VIRGEN` o `PROVISIONED` | `{"cmd":"confirm_alta","status":"error","error":"invalid_state"}` |
+
 **Si el timeout vence sin `confirm_alta`**: vuelve a `VIRGEN`, descarta el token, sigue en `SG0-`.
+
+**Si el hub arranca y encuentra `PENDING`**: descarta el token y vuelve a `VIRGEN` inmediatamente. El timeout vive en RAM y no sobrevive a un corte de energía; sin esta regla un hub podría quedar atrapado en un alta a medias. Es preferible que el usuario repita el alta a que el hub quede inservible.
+
+**Persistencia transaccional.** `begin_alta` toca token, modo y estado. Guardarlos en ese orden con el estado al final y un solo `nvs_commit()`, de modo que el estado sea el marcador de validez: si el commit falla, el hub sigue `VIRGEN`. En `confirm_alta`, `PROVISIONED` se publica en RAM recién después de que el commit haya terminado bien.
 
 ## 4. El token protege el canal
 
