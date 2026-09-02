@@ -10,6 +10,7 @@
 #include "esp_log.h"
 #include "esp_blufi.h"
 #include "blufi_manager.h"
+#include "blufi_internal.h"
 #if CONFIG_BT_CONTROLLER_ENABLED || !CONFIG_BT_NIMBLE_ENABLED
 #include "esp_bt.h"
 #endif

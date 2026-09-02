@@ -19,6 +19,7 @@ typedef enum {
 esp_err_t app_mode_manager_init(void);
 esp_err_t app_mode_manager_get(app_mode_t *mode);
 esp_err_t app_mode_manager_set(app_mode_t mode);
+void app_mode_manager_apply_committed(app_mode_t mode);
 
 const char *app_mode_manager_to_string(app_mode_t mode);
 esp_err_t app_mode_manager_parse(const char *value, app_mode_t *mode);

@@ -135,6 +135,14 @@ esp_err_t app_mode_manager_set(app_mode_t mode)
     return err;
 }
 
+void app_mode_manager_apply_committed(app_mode_t mode)
+{
+    if (mode != APP_MODE_OFFLINE && mode != APP_MODE_ONLINE) return;
+    s_current_mode = mode;
+    ESP_LOGI(TAG, "Modo transaccional aplicado: %s", app_mode_manager_to_string(mode));
+    app_mode_manager_notify(mode);
+}
+
 EventGroupHandle_t app_mode_manager_event_group(void)
 {
     return s_mode_event_group;

@@ -21,6 +21,7 @@
 #include "detector_manager.h"
 #include "button_manager.h"
 #include "app_mode_manager.h"
+#include "provisioning_manager.h"
 
 
 #define TAG "HUB"
@@ -228,14 +229,15 @@ void app_main(void)
     ESP_ERROR_CHECK(app_mode_manager_get(&app_mode));
     ESP_LOGI(TAG, "Modo de trabajo: %s", app_mode_manager_to_string(app_mode));
 
-    button_init();
-
         // Obtener la MAC local en formato string
     uint8_t mac[6];
     esp_read_mac(mac, ESP_MAC_WIFI_STA);
     snprintf(mac_local, sizeof(mac_local), "%02X%02X%02X%02X%02X%02X",
                 mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
     ESP_LOGI(TAG, "🆔 MAC local: %s", mac_local);
+
+    ESP_ERROR_CHECK(provisioning_manager_init());
+    button_init();
 
     semaforo_wifi_listo = xSemaphoreCreateBinary();
     semaforo_time_listo = xSemaphoreCreateBinary(); 

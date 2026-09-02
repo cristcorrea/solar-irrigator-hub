@@ -25,6 +25,8 @@
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_log.h"
+#include "esp_gap_ble_api.h"
+#include "esp_timer.h"
 #include "nvs_flash.h"
 #if CONFIG_BT_CONTROLLER_ENABLED || !CONFIG_BT_NIMBLE_ENABLED
 #include "esp_bt.h"
@@ -32,11 +34,13 @@
 
 #include "esp_blufi_api.h"
 #include "blufi_manager.h"
+#include "blufi_internal.h"
 #include "esp_blufi.h"
 #include "cJSON.h"
 #include "app_mode_manager.h"
 #include "esfera_manager.h"
 #include "time_sync.h"
+#include "provisioning_manager.h"
 
 #define EXAMPLE_INVALID_REASON 255
 #define EXAMPLE_INVALID_RSSI -128
@@ -67,6 +71,9 @@ static int gl_sta_ssid_len;
 static wifi_sta_list_t gl_sta_list;
 static bool gl_sta_is_connecting = false;
 static esp_blufi_extra_info_t gl_sta_conn_info;
+static esp_timer_handle_t s_visibility_timer;
+static bool s_visibility_override;
+static char s_ble_name[17];
 
 extern SemaphoreHandle_t semaforo_wifi_listo;
 extern char mac_local[13];
@@ -103,6 +110,67 @@ static void blufi_send_mode_response(const char *cmd, const char *status, app_mo
     blufi_send_json_response(cmd, status, "mode", app_mode_manager_to_string(mode), error);
 }
 
+static void blufi_send_error_only(const char *error)
+{
+    char response[80];
+    int len = snprintf(response, sizeof(response),
+                       "{\"status\":\"error\",\"error\":\"%s\"}", error);
+    if (len > 0 && len < (int)sizeof(response)) {
+        esp_blufi_send_custom_data((uint8_t *)response, (size_t)len);
+    }
+}
+
+static void blufi_update_name(void)
+{
+    snprintf(s_ble_name, sizeof(s_ble_name), "%s-%s",
+             provisioning_manager_state() == PROVISIONING_PROVISIONED ? "SG1" : "SG0",
+             mac_local);
+    esp_err_t err = esp_ble_gap_set_device_name(s_ble_name);
+    if (err != ESP_OK) BLUFI_ERROR("No se pudo cambiar nombre BLE a %s: %s\n",
+                                   s_ble_name, esp_err_to_name(err));
+}
+
+static bool blufi_advertising_allowed(void)
+{
+    provisioning_state_t state = provisioning_manager_state();
+    app_mode_t mode = APP_MODE_OFFLINE;
+    app_mode_manager_get(&mode);
+    return state != PROVISIONING_PROVISIONED || mode == APP_MODE_OFFLINE || s_visibility_override;
+}
+
+static void blufi_apply_advertising_policy(void)
+{
+    blufi_update_name();
+    if (ble_is_connected) {
+        esp_blufi_adv_stop();
+    } else if (blufi_advertising_allowed()) {
+        esp_blufi_adv_start_with_name(s_ble_name);
+    } else {
+        esp_blufi_adv_stop();
+    }
+}
+
+static void visibility_timeout_cb(void *arg)
+{
+    s_visibility_override = false;
+    blufi_apply_advertising_policy();
+    BLUFI_INFO("Ventana de visibilidad BLE finalizada\n");
+}
+
+esp_err_t blufi_make_visible_temporarily(void)
+{
+    app_mode_t mode = APP_MODE_OFFLINE;
+    if (provisioning_manager_state() != PROVISIONING_PROVISIONED ||
+        app_mode_manager_get(&mode) != ESP_OK || mode != APP_MODE_ONLINE) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    s_visibility_override = true;
+    esp_timer_stop(s_visibility_timer);
+    esp_err_t err = esp_timer_start_once(s_visibility_timer, 120LL * 1000LL * 1000LL);
+    if (err == ESP_OK) blufi_apply_advertising_policy();
+    return err;
+}
+
 static void blufi_handle_custom_json(const uint8_t *data, uint32_t data_len)
 {
     if (data == NULL || data_len == 0 || data_len > 512) {
@@ -113,6 +181,71 @@ static void blufi_handle_custom_json(const uint8_t *data, uint32_t data_len)
     cJSON *root = cJSON_ParseWithLength((const char *)data, data_len);
     if (root == NULL) {
         blufi_send_mode_response("unknown", "error", APP_MODE_OFFLINE, "invalid_json");
+        return;
+    }
+
+    cJSON *cmd_item = cJSON_GetObjectItemCaseSensitive(root, "cmd");
+    const char *incoming_cmd = cJSON_IsString(cmd_item) ? cmd_item->valuestring : NULL;
+
+    if (incoming_cmd != NULL && strcmp(incoming_cmd, "begin_alta") == 0) {
+        if (provisioning_manager_state() == PROVISIONING_PROVISIONED) {
+            cJSON_Delete(root);
+            blufi_send_json_response("begin_alta", "error", NULL, NULL, "already_provisioned");
+            return;
+        }
+        cJSON *mode_item = cJSON_GetObjectItemCaseSensitive(root, "mode");
+        app_mode_t mode;
+        if (!cJSON_IsString(mode_item) ||
+            app_mode_manager_parse(mode_item->valuestring, &mode) != ESP_OK) {
+            cJSON_Delete(root);
+            blufi_send_json_response("begin_alta", "error", NULL, NULL, "invalid_mode");
+            return;
+        }
+        char token[PROVISIONING_TOKEN_HEX_LEN + 1];
+        esp_err_t err = provisioning_manager_begin(mode, token);
+        cJSON_Delete(root);
+        if (err != ESP_OK) {
+            blufi_send_json_response("begin_alta", "error", NULL, NULL, esp_err_to_name(err));
+            return;
+        }
+        char response[128];
+        int len = snprintf(response, sizeof(response),
+                           "{\"cmd\":\"begin_alta\",\"status\":\"ok\",\"mac\":\"%s\",\"tok\":\"%s\"}",
+                           mac_local, token);
+        esp_blufi_send_custom_data((uint8_t *)response, (size_t)len);
+        blufi_apply_advertising_policy();
+        return;
+    }
+
+    if (incoming_cmd != NULL && strcmp(incoming_cmd, "confirm_alta") == 0) {
+        provisioning_state_t state = provisioning_manager_state();
+        if (state != PROVISIONING_PENDING) {
+            cJSON_Delete(root);
+            blufi_send_json_response("confirm_alta", "error", NULL, NULL, "invalid_state");
+            return;
+        }
+        cJSON *token_item = cJSON_GetObjectItemCaseSensitive(root, "tok");
+        esp_err_t err = provisioning_manager_confirm(cJSON_IsString(token_item)
+                                                          ? token_item->valuestring : NULL);
+        cJSON_Delete(root);
+        if (err == ESP_ERR_INVALID_CRC) {
+            blufi_send_error_only("unauthorized");
+            return;
+        }
+        if (err != ESP_OK) {
+            blufi_send_json_response("confirm_alta", "error", NULL, NULL, esp_err_to_name(err));
+            return;
+        }
+        blufi_send_json_response("confirm_alta", "ok", NULL, NULL, NULL);
+        blufi_apply_advertising_policy();
+        return;
+    }
+
+    cJSON *token_item = cJSON_GetObjectItemCaseSensitive(root, "tok");
+    if (!cJSON_IsString(token_item) ||
+        !provisioning_manager_token_matches(token_item->valuestring)) {
+        cJSON_Delete(root);
+        blufi_send_error_only("unauthorized");
         return;
     }
 
@@ -166,7 +299,6 @@ static void blufi_handle_custom_json(const uint8_t *data, uint32_t data_len)
         return;
     }
 
-    cJSON *cmd_item = cJSON_GetObjectItem(root, "cmd");
     if (!cJSON_IsString(cmd_item)) {
         cJSON_Delete(root);
         blufi_send_mode_response("unknown", "error", APP_MODE_OFFLINE, "missing_cmd");
@@ -262,6 +394,7 @@ static void blufi_handle_custom_json(const uint8_t *data, uint32_t data_len)
         }
 
         blufi_send_mode_response(cmd, "ok", mode, NULL);
+        blufi_apply_advertising_policy();
         return;
     }
 
@@ -570,7 +703,7 @@ static void example_event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_para
     case ESP_BLUFI_EVENT_INIT_FINISH:
         BLUFI_INFO("BLUFI init finish\n");
 
-        esp_blufi_adv_start();
+        blufi_apply_advertising_policy();
         break;
     case ESP_BLUFI_EVENT_DEINIT_FINISH:
         BLUFI_INFO("BLUFI deinit finish\n");
@@ -585,7 +718,7 @@ static void example_event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_para
         BLUFI_INFO("BLUFI ble disconnect\n");
         ble_is_connected = false;
         blufi_security_deinit();
-        esp_blufi_adv_start();
+        blufi_apply_advertising_policy();
         break;
     case ESP_BLUFI_EVENT_SET_WIFI_OPMODE:
         BLUFI_INFO("BLUFI Set WIFI opmode %d\n", param->wifi_mode.op_mode);
@@ -759,6 +892,13 @@ static void example_event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_para
 esp_err_t blufi_init(void)
 {
     esp_err_t ret;
+
+    const esp_timer_create_args_t timer_args = {
+        .callback = visibility_timeout_cb,
+        .name = "ble_visible",
+    };
+    ret = esp_timer_create(&timer_args, &s_visibility_timer);
+    if (ret != ESP_OK) return ret;
 
     initialise_wifi();
 

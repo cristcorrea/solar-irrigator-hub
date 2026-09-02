@@ -19,4 +19,5 @@ idf_component_register(
         detector_manager
         button_manager
         app_mode_manager
+        provisioning_manager
 )

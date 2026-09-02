@@ -8,6 +8,7 @@
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "esfera_manager.h"
+#include "blufi_manager.h"
 
 #define BTN_GPIO                19
 #define DEBOUNCE_US             40000      // 40 ms
@@ -123,8 +124,15 @@ static void button_task(void *arg)
                     ESP_LOGI(TAG, "Pulsación 3 s: borrando esferas, config_store y telemetry (conserva Wi-Fi)");
                     borrar_esferas_config_y_telemetria();
                 } else {
-                    ESP_LOGI(TAG, "Short press → acción corta (p.ej. enviar comando MQTT)");
-                    // TODO: tu acción (ej. publicar 'S' por MQTT)
+                    esp_err_t visible_err = blufi_make_visible_temporarily();
+                    if (visible_err == ESP_OK) {
+                        ESP_LOGI(TAG, "Pulsación corta: advertising BLE activo durante 2 minutos");
+                    } else if (visible_err == ESP_ERR_INVALID_STATE) {
+                        ESP_LOGI(TAG, "Pulsación corta: advertising ya permanente para este estado/modo");
+                    } else {
+                        ESP_LOGE(TAG, "No se pudo activar advertising temporal: %s",
+                                 esp_err_to_name(visible_err));
+                    }
                 }
             }
         }
