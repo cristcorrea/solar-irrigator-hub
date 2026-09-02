@@ -16,6 +16,6 @@ config TELEMETRY_LOG_SECTOR_COUNT
     help
         Derived number of 4 KiB sectors used by the raw telemetry log. One
         sector is maintained erased as a spare, so the useful capacity is
-        (sector count - 1) * 202 records.
+        (sector count - 1) * 168 records.
 
 endmenu

@@ -24,12 +24,13 @@
 #define SECTOR_SIZE 4096U
 #define SECTOR_COUNT CONFIG_TELEMETRY_LOG_SECTOR_COUNT
 #define ACK_WORDS 8U
-#define RECORDS_PER_SECTOR 202U
+#define RECORDS_PER_SECTOR 168U
 #define PAGE_MAX 100U
 #define PAGE_JSON_BASE_SIZE 128U
-#define PAGE_JSON_ITEM_SIZE 160U
+#define PAGE_JSON_ITEM_SIZE 200U
 #define WRITE_QUEUE_LEN 64U
-#define SECTOR_MAGIC 0x5347544cUL
+#define SECTOR_MAGIC 0x5347544dUL
+#define LEGACY_SECTOR_MAGIC 0x5347544cUL
 
 typedef struct __attribute__((packed)) {
     uint32_t ts;
@@ -37,8 +38,11 @@ typedef struct __attribute__((packed)) {
     int16_t hum;
     int16_t temp;
     uint16_t vbat;
+    uint16_t ml;
     uint8_t riego;
+    uint8_t st;
     uint8_t flags;
+    uint8_t reserved;
     uint16_t crc;
 } telemetry_rec_t;
 
@@ -74,8 +78,21 @@ typedef struct {
 #endif
 } queued_record_t;
 
-_Static_assert(sizeof(telemetry_rec_t) == 20, "telemetry record must be 20 bytes");
+_Static_assert(sizeof(telemetry_rec_t) == 24, "telemetry record must be 24 bytes");
+_Static_assert(offsetof(telemetry_rec_t, ts) == 0, "unexpected ts offset");
+_Static_assert(offsetof(telemetry_rec_t, mac) == 4, "unexpected mac offset");
+_Static_assert(offsetof(telemetry_rec_t, hum) == 10, "unexpected hum offset");
+_Static_assert(offsetof(telemetry_rec_t, temp) == 12, "unexpected temp offset");
+_Static_assert(offsetof(telemetry_rec_t, vbat) == 14, "unexpected vbat offset");
+_Static_assert(offsetof(telemetry_rec_t, ml) == 16, "unexpected ml offset");
+_Static_assert(offsetof(telemetry_rec_t, riego) == 18, "unexpected riego offset");
+_Static_assert(offsetof(telemetry_rec_t, st) == 19, "unexpected st offset");
+_Static_assert(offsetof(telemetry_rec_t, flags) == 20, "unexpected flags offset");
+_Static_assert(offsetof(telemetry_rec_t, reserved) == 21, "unexpected reserved offset");
+_Static_assert(offsetof(telemetry_rec_t, crc) == 22, "unexpected crc offset");
 _Static_assert(sizeof(sector_header_t) == 44, "sector header must be 44 bytes");
+_Static_assert(sizeof(sector_header_t) + RECORDS_PER_SECTOR * sizeof(telemetry_rec_t) <= SECTOR_SIZE,
+               "telemetry records exceed sector size");
 _Static_assert(SECTOR_COUNT >= 3 && SECTOR_COUNT <= 128,
                "telemetry sector count must be between 3 and 128");
 
@@ -371,6 +388,7 @@ static esp_err_t scan_partition(void)
 {
     uint32_t newest_seq = 0;
     int newest_sector = -1;
+    unsigned legacy_sectors = 0;
     s_pending = 0;
     memset(s_sectors, 0, sizeof(s_sectors));
 
@@ -378,7 +396,12 @@ static esp_err_t scan_partition(void)
         sector_header_t header;
         esp_err_t err = esp_partition_read(s_partition, sector_offset(sector), &header, sizeof(header));
         if (err != ESP_OK) return err;
-        if (header.magic != SECTOR_MAGIC || header.reserved != ~header.seq) continue;
+        if (header.magic != SECTOR_MAGIC || header.reserved != ~header.seq) {
+            if (header.magic == LEGACY_SECTOR_MAGIC && header.reserved == ~header.seq) {
+                ++legacy_sectors;
+            }
+            continue;
+        }
 
         sector_info_t *info = &s_sectors[sector];
         info->valid = true;
@@ -419,6 +442,9 @@ static esp_err_t scan_partition(void)
     s_write_sector = newest_sector;
     s_write_slot = newest_sector < 0 ? 0 :
                    (s_sectors[newest_sector].sealed ? RECORDS_PER_SECTOR : s_sectors[newest_sector].used);
+    if (legacy_sectors > 0) {
+        ESP_LOGW(TAG, "Formato de telemetría anterior descartado: %u sectores", legacy_sectors);
+    }
     ESP_LOGI(TAG, "Log reconstruido: head sector=%d slot=%u, pendientes=%u",
              s_write_sector, s_write_slot, (unsigned)s_pending);
     return ensure_spare_locked();
@@ -478,16 +504,32 @@ esp_err_t esfera_manager_init(void)
 esp_err_t esfera_manager_add(const char *raw_payload, const char *mac_origen)
 {
     float h, t, v;
-    int r;
+    int r, ml, st;
     char claimed[13], trailing;
     uint8_t mac[6];
-    if (!raw_payload || !mac_to_bytes(mac_origen, mac) ||
-        sscanf(raw_payload, "%f,%f,%f,%d %12s %c", &h, &t, &v, &r, claimed, &trailing) != 5 ||
+    if (!raw_payload || !mac_to_bytes(mac_origen, mac)) return ESP_ERR_INVALID_ARG;
+
+    int version = 2;
+    int parsed = sscanf(raw_payload, "%f,%f,%f,%d,%d,%d %12s %c",
+                        &h, &t, &v, &r, &ml, &st, claimed, &trailing);
+    if (parsed != 7) {
+        version = 1;
+        parsed = sscanf(raw_payload, "%f,%f,%f,%d %12s %c",
+                        &h, &t, &v, &r, claimed, &trailing);
+        if (parsed != 5) return ESP_ERR_INVALID_ARG;
+        ml = 0;
+        st = 0x01;
+    }
+
+    if (
         !isfinite(h) || !isfinite(t) || !isfinite(v) || h < 0 || h > 100 ||
         t < -50 || t > 100 || v < 0 || v > 20 || (r != 0 && r != 1) ||
+        ml < 0 || ml > 65535 || st < 0 || st > 255 ||
         strcasecmp(claimed, mac_origen) != 0) {
         return ESP_ERR_INVALID_ARG;
     }
+
+    ESP_LOGI(TAG, "Telemetría v%d aceptada: MAC=%s ml=%d st=%d", version, claimed, ml, st);
 
     queued_record_t queued = {
         .record = {
@@ -495,8 +537,11 @@ esp_err_t esfera_manager_add(const char *raw_payload, const char *mac_origen)
             .hum = (int16_t)lroundf(h * 10.0f),
             .temp = (int16_t)lroundf(t * 10.0f),
             .vbat = (uint16_t)lroundf(v * 1000.0f),
+            .ml = (uint16_t)ml,
             .riego = (uint8_t)r,
+            .st = (uint8_t)st,
             .flags = time_sync_is_valid() ? 1U : 0U,
+            .reserved = 0,
         },
         .generation = s_generation,
     };
@@ -740,10 +785,10 @@ char *esfera_manager_page_json(size_t max, uint32_t *page_id, uint32_t *last_seq
         ok = json_append(&cursor, &available,
                          "%s{\"mac\":\"%s\",\"humedad\":%.1f,"
                          "\"temperatura\":%.1f,\"bateria\":%.3f,\"riego\":%u,"
-                         "\"timestamp\":\"%s\",\"tsOk\":%s}",
+                         "\"ml\":%u,\"st\":%u,\"timestamp\":\"%s\",\"tsOk\":%s}",
                          i == 0 ? "" : ",", mac, rec.hum / 10.0,
                          rec.temp / 10.0, rec.vbat / 1000.0,
-                         (unsigned)rec.riego, timestamp,
+                         (unsigned)rec.riego, (unsigned)rec.ml, (unsigned)rec.st, timestamp,
                          (rec.flags & 1U) != 0 ? "true" : "false");
     }
     ok = ok && json_append(&cursor, &available, "]}");
