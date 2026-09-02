@@ -16,5 +16,6 @@ size_t esfera_manager_count(void);
 esp_err_t esfera_manager_debug_fill(size_t count, size_t *written);
 #endif
 esp_err_t esfera_manager_store_config(const char *payload, size_t payload_len, char normalized_mac[13]);
+char *esfera_manager_cfg_status_json(void);
 esp_err_t esfera_manager_register_mac(const char *mac);
 bool esfera_manager_is_registered(const char *mac);

@@ -65,6 +65,7 @@ const int CONNECTED_BIT = BIT0;
 static bool gl_sta_connected = false;
 static bool gl_sta_got_ip = false;
 static bool ble_is_connected = false;
+static bool s_session_authorized = false;
 static uint8_t gl_sta_bssid[6];
 static uint8_t gl_sta_ssid[32];
 static int gl_sta_ssid_len;
@@ -118,6 +119,17 @@ static void blufi_send_error_only(const char *error)
     if (len > 0 && len < (int)sizeof(response)) {
         esp_blufi_send_custom_data((uint8_t *)response, (size_t)len);
     }
+}
+
+static bool blufi_native_wifi_authorized(const char *event_name)
+{
+    if (provisioning_manager_state() == PROVISIONING_PROVISIONED &&
+        !s_session_authorized) {
+        BLUFI_ERROR("Evento Wi-Fi nativo %s rechazado: sesión BLE no autorizada\n", event_name);
+        blufi_send_error_only("unauthorized");
+        return false;
+    }
+    return true;
 }
 
 static void blufi_update_name(void)
@@ -236,6 +248,7 @@ static void blufi_handle_custom_json(const uint8_t *data, uint32_t data_len)
             blufi_send_json_response("confirm_alta", "error", NULL, NULL, esp_err_to_name(err));
             return;
         }
+        s_session_authorized = true;
         blufi_send_json_response("confirm_alta", "ok", NULL, NULL, NULL);
         blufi_apply_advertising_policy();
         return;
@@ -248,6 +261,7 @@ static void blufi_handle_custom_json(const uint8_t *data, uint32_t data_len)
         blufi_send_error_only("unauthorized");
         return;
     }
+    s_session_authorized = true;
 
     cJSON *data_item = cJSON_GetObjectItemCaseSensitive(root, "Data");
     if (data_item != NULL && !cJSON_IsBool(data_item)) {
@@ -312,6 +326,20 @@ static void blufi_handle_custom_json(const uint8_t *data, uint32_t data_len)
     }
     char cmd[24];
     strcpy(cmd, cmd_item->valuestring);
+    if (strcmp(cmd, "get_cfg_status") == 0) {
+        cJSON_Delete(root);
+        char *response = esfera_manager_cfg_status_json();
+        if (response == NULL) {
+            blufi_send_json_response(cmd, "error", NULL, NULL, "no_memory");
+            return;
+        }
+        esp_err_t send_err = esp_blufi_send_custom_data((uint8_t *)response, strlen(response));
+        if (send_err != ESP_OK) {
+            BLUFI_ERROR("No se pudo enviar get_cfg_status: %s\n", esp_err_to_name(send_err));
+        }
+        free(response);
+        return;
+    }
 #if CONFIG_TELEMETRY_LOG_TEST_MODE
     if (strcmp(cmd, "debug_fill") == 0) {
         cJSON *hub_item = cJSON_GetObjectItemCaseSensitive(root, "MACHUB");
@@ -711,20 +739,24 @@ static void example_event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_para
     case ESP_BLUFI_EVENT_BLE_CONNECT:
         BLUFI_INFO("BLUFI ble connect\n");
         ble_is_connected = true;
+        s_session_authorized = false;
         esp_blufi_adv_stop();
         blufi_security_init();
         break;
     case ESP_BLUFI_EVENT_BLE_DISCONNECT:
         BLUFI_INFO("BLUFI ble disconnect\n");
         ble_is_connected = false;
+        s_session_authorized = false;
         blufi_security_deinit();
         blufi_apply_advertising_policy();
         break;
     case ESP_BLUFI_EVENT_SET_WIFI_OPMODE:
+        if (!blufi_native_wifi_authorized("SET_WIFI_OPMODE")) break;
         BLUFI_INFO("BLUFI Set WIFI opmode %d\n", param->wifi_mode.op_mode);
         ESP_ERROR_CHECK(esp_wifi_set_mode(param->wifi_mode.op_mode));
         break;
     case ESP_BLUFI_EVENT_REQ_CONNECT_TO_AP:
+        if (!blufi_native_wifi_authorized("REQ_CONNECT_TO_AP")) break;
         BLUFI_INFO("BLUFI requset wifi connect to AP\n");
         /* there is no wifi callback when the device has already connected to this wifi
         so disconnect wifi before connection.
@@ -733,6 +765,7 @@ static void example_event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_para
         example_wifi_connect();
         break;
     case ESP_BLUFI_EVENT_REQ_DISCONNECT_FROM_AP:
+        if (!blufi_native_wifi_authorized("REQ_DISCONNECT_FROM_AP")) break;
         BLUFI_INFO("BLUFI requset wifi disconnect from AP\n");
         esp_wifi_disconnect();
         break;
@@ -776,6 +809,7 @@ static void example_event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_para
         /* TODO */
         break;
     case ESP_BLUFI_EVENT_RECV_STA_BSSID:
+        if (!blufi_native_wifi_authorized("RECV_STA_BSSID")) break;
         memcpy(sta_config.sta.bssid, param->sta_bssid.bssid, 6);
         sta_config.sta.bssid_set = 1;
         esp_wifi_set_config(WIFI_IF_STA, &sta_config);
@@ -783,6 +817,7 @@ static void example_event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_para
         break;
     case ESP_BLUFI_EVENT_RECV_STA_SSID:
     {
+        if (!blufi_native_wifi_authorized("RECV_STA_SSID")) break;
         size_t ssid_len = param->sta_ssid.ssid_len;
         if (ssid_len == 0 || ssid_len > sizeof(sta_config.sta.ssid)) {
             esp_blufi_send_error_info(ESP_BLUFI_DATA_FORMAT_ERROR);
@@ -796,6 +831,7 @@ static void example_event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_para
     }
     case ESP_BLUFI_EVENT_RECV_STA_PASSWD:
     {
+        if (!blufi_native_wifi_authorized("RECV_STA_PASSWD")) break;
         size_t password_len = param->sta_passwd.passwd_len;
         if (password_len > sizeof(sta_config.sta.password)) {
             esp_blufi_send_error_info(ESP_BLUFI_DATA_FORMAT_ERROR);

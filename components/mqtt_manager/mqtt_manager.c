@@ -260,6 +260,7 @@ static void intentar_enviar_configuracion_a_esfera(const char *mac_str, const ui
     if (send_result == ESP_OK)
     {
         ESP_LOGI(TAG, "✅ Configuración enviada a %s", mac_str);
+        ESP_LOGI(TAG, "Configuración ESP-NOW: %u bytes", (unsigned)strlen(config_json));
         ESP_LOGI(TAG, "%s", config_json);
     }
     else
@@ -417,6 +418,21 @@ static esp_err_t mqtt_event_handler_cb(esp_mqtt_event_handle_t event)
                              ack_err == ESP_OK ? "ok" : "error",
                              (unsigned)esfera_manager_count());
                     esp_mqtt_client_publish(event->client, topic_public, response, 0, 1, 0);
+                }
+            } else if (cJSON_IsString(cmd) && strcmp(cmd->valuestring, "get_cfg_status") == 0) {
+                cJSON *hub = cJSON_GetObjectItemCaseSensitive(json, "MACHUB");
+                if (!cJSON_IsString(hub) || strcmp(hub->valuestring, mac_local) != 0) {
+                    ESP_LOGW(TAG, "get_cfg_status MQTT inválido o dirigido a otro hub");
+                } else {
+                    char *response = esfera_manager_cfg_status_json();
+                    if (response == NULL) {
+                        static const char error_response[] =
+                            "{\"cmd\":\"get_cfg_status\",\"status\":\"error\",\"error\":\"no_memory\"}";
+                        esp_mqtt_client_publish(event->client, topic_public, error_response, 0, 1, 0);
+                    } else {
+                        esp_mqtt_client_publish(event->client, topic_public, response, 0, 1, 0);
+                        free(response);
+                    }
                 }
             } else {
                 ESP_LOGI(TAG, "Configuración recibida");

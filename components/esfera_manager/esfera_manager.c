@@ -298,6 +298,9 @@ esp_err_t esfera_manager_store_config(const char *payload, size_t payload_len, c
         return ESP_ERR_INVALID_ARG;
     }
 
+    cJSON_DeleteItemFromObjectCaseSensitive(json, "tok");
+    cJSON_DeleteItemFromObjectCaseSensitive(json, "Data");
+
     char *canonical_json = cJSON_PrintUnformatted(json);
     cJSON_Delete(json);
     if (canonical_json == NULL) {
@@ -309,6 +312,8 @@ esp_err_t esfera_manager_store_config(const char *payload, size_t payload_len, c
         free(canonical_json);
         return ESP_ERR_INVALID_SIZE;
     }
+    ESP_LOGI("ESFERA_MANAGER", "Configuración saneada para %s: %u bytes (sin tok/Data)",
+             normalized_mac, (unsigned)strlen(canonical_json));
 
     nvs_handle_t handle = 0;
     esp_err_t err = nvs_open("config_store", NVS_READWRITE, &handle);
@@ -329,6 +334,64 @@ esp_err_t esfera_manager_store_config(const char *payload, size_t payload_len, c
     }
     free(canonical_json);
     return err;
+}
+
+char *esfera_manager_cfg_status_json(void)
+{
+    enum { MAX_ITEMS = 20, ITEM_BUDGET = 64, BASE_BUDGET = 64 };
+    size_t capacity = BASE_BUDGET + MAX_ITEMS * ITEM_BUDGET;
+    char *json = malloc(capacity);
+    if (json == NULL) return NULL;
+
+    size_t used = (size_t)snprintf(json, capacity,
+                                  "{\"cmd\":\"get_cfg_status\",\"status\":\"ok\",\"items\":[");
+    nvs_handle_t handle = 0;
+    esp_err_t open_err = nvs_open("config_store", NVS_READONLY, &handle);
+    if (open_err != ESP_OK && open_err != ESP_ERR_NVS_NOT_FOUND) {
+        free(json);
+        return NULL;
+    }
+
+    nvs_iterator_t iterator = NULL;
+    esp_err_t iter_err = nvs_entry_find(NVS_DEFAULT_PART_NAME, "config_store", NVS_TYPE_U8,
+                                        &iterator);
+    size_t count = 0;
+    while (iter_err == ESP_OK && iterator != NULL && count < MAX_ITEMS) {
+        nvs_entry_info_t info;
+        nvs_entry_info(iterator, &info);
+        size_t key_len = strlen(info.key);
+        bool ack_key = key_len == 13 && info.key[0] == 'a';
+        for (size_t i = 1; ack_key && i < key_len; ++i) {
+            char c = info.key[i];
+            ack_key = (c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') ||
+                      (c >= 'a' && c <= 'f');
+        }
+        if (ack_key && handle != 0) {
+            uint8_t applied = 0;
+            if (nvs_get_u8(handle, info.key, &applied) == ESP_OK) {
+                int written = snprintf(json + used, capacity - used,
+                                       "%s{\"MACSLAVE\":\"%s\",\"applied\":%s}",
+                                       count == 0 ? "" : ",", info.key + 1,
+                                       applied == 1 ? "true" : "false");
+                if (written < 0 || (size_t)written >= capacity - used) {
+                    nvs_release_iterator(iterator);
+                    if (handle != 0) nvs_close(handle);
+                    free(json);
+                    return NULL;
+                }
+                used += (size_t)written;
+                ++count;
+            }
+        }
+        iter_err = nvs_entry_next(&iterator);
+    }
+    if (iterator != NULL) nvs_release_iterator(iterator);
+    if (handle != 0) nvs_close(handle);
+    if (snprintf(json + used, capacity - used, "]}") >= (int)(capacity - used)) {
+        free(json);
+        return NULL;
+    }
+    return json;
 }
 
 esp_err_t esfera_manager_register_mac(const char *mac) {
