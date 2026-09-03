@@ -1,3 +1,9 @@
+> [!WARNING]
+> **Documento desactualizado (2026-09-02).** El dump ya no es un array plano sino un objeto paginado
+> con `page_id`, `last_seq`, `pend` e `items`, y el borrado exige `ack_data` explicito. El catalogo
+> BLE esta incompleto: faltan `ack_data`, `begin_alta`, `confirm_alta`, el parametro `max` y el
+> campo `tok` obligatorio. Contratos reales: `D:\Firmware\SISTEMA-SMARTGROW.md`, secciones 3 a 5.
+
 # Communication message formats
 
 ## MQTT

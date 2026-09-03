@@ -1,3 +1,8 @@
+> [!WARNING]
+> **Documento desactualizado (2026-09-02).** La telemetria ya no se guarda en NVS sino en una
+> particion raw, y el envio por BLE ya no borra al transmitir. Falta por completo la maquina de
+> estados de alta y token. Flujos reales: `D:\Firmware\SISTEMA-SMARTGROW.md`, secciones 6 y 7.
+
 # Communication flows
 
 ## Boot and mode changes

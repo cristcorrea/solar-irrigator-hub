@@ -1,3 +1,9 @@
+> [!NOTE]
+> **Implementado (2026-09-02).** Las dos etapas de este brief estan en el codigo desde `e9a270b`:
+> tabla de particiones con `ota_0`/`ota_1`/`telemetry`, log circular con mapa de bits de confirmacion,
+> paginacion en BLE y MQTT, reset de fabrica ampliado y persistencia del reloj. Se conserva como
+> especificacion de origen. Descripcion del estado actual: `D:\Firmware\SISTEMA-SMARTGROW.md`.
+
 # Brief de implementación — almacenamiento de telemetría y particiones
 
 > Destinatario: agente de firmware del HUB.

@@ -1,3 +1,9 @@
+> [!NOTE]
+> **Implementado (2026-09-02).** Este brief esta en el codigo desde `ccef524`: nombres `SG0-`/`SG1-`,
+> `provisioning_state`, alta en dos fases con token de 16 bytes, politica de advertising y pulsacion
+> corta del boton. Sigue **fuera de alcance** `NEGOTIATE_SECURITY`, asi que el token continua viajando
+> en claro. Se conserva como especificacion de origen. Estado actual: `D:\Firmware\SISTEMA-SMARTGROW.md`.
+
 # Brief 3 — Alta, vinculación y token
 
 > Destinatario: agente de firmware del HUB.

@@ -1,3 +1,9 @@
+> [!WARNING]
+> **Documento desactualizado (2026-09-02).** Describe una particion `nvs` de 24 KiB y el blob
+> `telemetry/pending` de 32 registros. Hoy la `nvs` es de 56 KB, la telemetria vive en una particion
+> raw propia de 512 KB, y faltan las claves `prov_state`, `prov_token` y el namespace `clock`.
+> Mapa real: `D:\Firmware\SISTEMA-SMARTGROW.md`, seccion 10.
+
 # NVS map
 
 Partition: `nvs`, offset `0x9000`, size `0x6000` (24 KiB).

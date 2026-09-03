@@ -1,3 +1,9 @@
+> [!WARNING]
+> **Documento desactualizado (2026-09-02).** Describe una particion `factory` de 1,5 MB ocupada al
+> 95 % y sin ranuras OTA. Hoy hay `ota_0` y `ota_1` de 2 MB cada una y el binario ocupa el 73,7 %.
+> Los riesgos sobre la entrega de telemetria por BLUFI se resolvieron con `page_id` y `ack_data`.
+> Estado real: `D:\Firmware\SISTEMA-SMARTGROW.md`.
+
 # Firmware review (ESP-IDF 5.5.3)
 
 ## Verified architecture

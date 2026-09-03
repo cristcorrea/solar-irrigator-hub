@@ -1,3 +1,9 @@
+> [!WARNING]
+> **Reemplazado (2026-09-02).** Este documento quedo congelado en el commit `e26e9cc`, antes del
+> log circular con paginacion (`e9a270b`) y del alta BLE con token (`ccef524`).
+> Su sucesor, escrito contra el codigo actual de los tres proyectos, es
+> `D:\Firmware\SISTEMA-SMARTGROW.md`.
+
 # Sistema SmartGrow — Visión de conjunto
 
 > Documento maestro de la serie de 4. Los detalles de cada pieza están en:

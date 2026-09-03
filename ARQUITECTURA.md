@@ -1,3 +1,10 @@
+> [!WARNING]
+> **Documento desactualizado (2026-09-02).** Describe el estado anterior a `e9a270b` (log circular
+> y descarga paginada) y `ccef524` (alta BLE con token). Entre otras cosas: el buffer de 32 entradas
+> en NVS ya no existe, el dump ya no es un array sin ACK, el hub ya no fuerza ONLINE al arrancar, y
+> la tabla de comandos BLE no incluye `begin_alta`, `confirm_alta`, `ack_data` ni el campo `tok`.
+> Contrato real entre hub, esfera y app: `D:\Firmware\SISTEMA-SMARTGROW.md` (seccion 13 para el detalle).
+
 # Firmware HUB — `solar-irrigator-hub`
 
 > Documento parte de una serie de 4:
